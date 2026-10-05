@@ -122,7 +122,7 @@ implementation
 uses
   Winapi.Windows
   ,System.Classes, System.SyncObjs, System.DateUtils, System.IOUtils
-  ,System.Generics.Collections
+  ,System.Generics.Collections, System.Generics.Defaults
   ,System.Net.URLClient
   ;
 
@@ -779,6 +779,26 @@ begin
   end;
 end;
 
+// Die Verwaltungsobjekte werden bewusst nie freigegeben (siehe finalization).
+// Dem Speichermanager als erwartet melden, damit FastMM beim Programmende
+// kein Leck anzeigt. Der Standard-Comparer der Liste ist ein eigener Block;
+// sein Interface-Zeiger ist der Blockanfang.
+{$WARN SYMBOL_PLATFORM OFF}
+procedure RegisterIntendedLeaks;
+var
+  lComparer: IComparer<TPendingEntry>;
+begin
+  RegisterExpectedMemoryLeak(GLock);
+  RegisterExpectedMemoryLeak(GFlushLock);
+  RegisterExpectedMemoryLeak(GQueue);
+  RegisterExpectedMemoryLeak(GUtf8);
+  RegisterExpectedMemoryLeak(GWakeup);
+  lComparer := GQueue.Comparer;
+  if lComparer <> nil then
+    RegisterExpectedMemoryLeak(Pointer(lComparer));
+end;
+{$WARN SYMBOL_PLATFORM DEFAULT}
+
 initialization
   GLock := TCriticalSection.Create;
   GFlushLock := TCriticalSection.Create;
@@ -786,6 +806,7 @@ initialization
   GUtf8 := TUTF8Encoding.Create;
   GWakeup := TEvent.Create(nil, False, False, '');
   GSource := LocalComputerName + ' | ' + ExtractFileName(ParamStr(0)) + ' | ' + LocalUserName;
+  RegisterIntendedLeaks;
 
 finalization
   StopWriter;
