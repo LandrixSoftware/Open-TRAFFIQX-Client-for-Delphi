@@ -7,6 +7,9 @@ The commercial license for Open-TRAFFIQX-Client-for-Delphi gives you the right t
 - make modifications to the source code of the library for your own use
 - use the component and source code on all development systems used by the company
 - sell any number of applications in any quantity without any additional run-time fees required
+- distribute your applications without any obligation to disclose your source code or your modifications of the library to Landrix Software or any other party
+
+The license is perpetual and includes all future updates of the library free of charge.
 
 A commercial licence is sold per company developing applications that use Open-TRAFFIQX-Client-for-Delphi. 
 The cost is 990,00 EUR plus VAT per company.
