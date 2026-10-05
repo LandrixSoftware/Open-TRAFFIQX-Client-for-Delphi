@@ -26,11 +26,23 @@ if (!is_string($session['state'] ?? null) || !hash_equals($session['state'], (st
     renderCallbackView(false, 'Ungültiger state.');
 }
 
+// Nur eine offene, nicht abgelaufene Session darf den Callback verarbeiten.
+// Das periodische Aufraeumen allein reicht nicht, und ein zweiter Aufruf darf
+// ein bereits gespeichertes Ergebnis nicht ueberschreiben.
+if (($session['status'] ?? null) !== 'pending') {
+    renderCallbackView(false, 'Diese Anmeldung wurde bereits abgeschlossen.');
+}
+$sessionExpiresAt = isset($session['expiresAt']) ? strtotime((string)$session['expiresAt']) : false;
+if ($sessionExpiresAt === false || $sessionExpiresAt < time()) {
+    $store->delete($sessionId);
+    renderCallbackView(false, 'Session wurde nicht gefunden oder ist abgelaufen.');
+}
+
 if (!empty($_GET['error'])) {
     $session['status'] = 'error';
     $session['error'] = [
-        'code' => (string)$_GET['error'],
-        'description' => (string)($_GET['error_description'] ?? ''),
+        'code' => limitText((string)$_GET['error'], 64),
+        'description' => limitText((string)($_GET['error_description'] ?? '')),
     ];
     $session['updatedAt'] = gmdate('c');
     $store->write($session);
@@ -50,6 +62,13 @@ if (empty($_GET['code'])) {
 
 try {
     $providerConfig = $session['provider'];
+
+    // Zwischen /start und Callback kann sich die DNS-Aufloesung geaendert haben.
+    $endpointProblem = providerEndpointProblem((string)$providerConfig['accessTokenUri']);
+    if ($endpointProblem !== null) {
+        throw new \RuntimeException('Token-Endpunkt abgewiesen: ' . $endpointProblem);
+    }
+
     $oauthProvider = new LandrixOAuthProvider([
         'clientId' => $providerConfig['clientId'],
         'clientSecret' => $providerConfig['clientSecret'],
@@ -88,19 +107,23 @@ try {
 
     renderCallbackView(true, appConfig()['callback']['successMessage'] ?? 'Vorgang abgeschlossen.');
 } catch (IdentityProviderException $e) {
+    // Die Meldung stammt aus der Fehlerantwort des Providers (z. B. "invalid_grant")
+    // und hilft dem Client; gekuerzt, damit keine langen Antwortinhalte durchgehen.
     $session['status'] = 'error';
     $session['error'] = [
         'code' => 'identity_provider_error',
-        'description' => $e->getMessage(),
+        'description' => limitText($e->getMessage()),
     ];
     $session['updatedAt'] = gmdate('c');
     $store->write($session);
     renderCallbackView(false, 'Token konnte nicht abgeholt werden.');
 } catch (\Throwable $e) {
+    // Interne Details (Pfade, Netzwerkfehler) nur ins Server-Log, nicht zum Client.
+    error_log('OAuth2-Broker callback ' . $sessionId . ': ' . $e->getMessage());
     $session['status'] = 'error';
     $session['error'] = [
         'code' => 'unexpected_error',
-        'description' => $e->getMessage(),
+        'description' => 'Der Token-Abruf beim Provider ist fehlgeschlagen.',
     ];
     $session['updatedAt'] = gmdate('c');
     $store->write($session);
@@ -118,6 +141,8 @@ function renderCallbackView(bool $success, string $message): void
 
     http_response_code($success ? 200 : 400);
     header('Content-Type: text/html; charset=utf-8');
+    header('Cache-Control: no-store');
+    header('Referrer-Policy: no-referrer');
     echo '<!DOCTYPE html><html lang="de"><head><meta charset="utf-8"><title>' . htmlspecialchars($title) . '</title>';
     echo '<meta name="viewport" content="width=device-width, initial-scale=1">';
     echo '<style>body{font-family:Segoe UI,Arial,sans-serif;background:#f4f4f4;margin:0;padding:2rem;}';
@@ -126,6 +151,16 @@ function renderCallbackView(bool $success, string $message): void
     echo '.panel p{line-height:1.4;}';
     echo '</style></head><body><div class="panel"><h1>' . htmlspecialchars($title) . '</h1><p>' . htmlspecialchars($text) . '</p></div></body></html>';
     exit;
+}
+
+/** Kuerzt Text zeichenweise (UTF-8-sicher, ohne mbstring). */
+function limitText(string $text, int $max = 200): string
+{
+    if (preg_match('/^.{0,' . $max . '}/us', $text, $m) !== 1) {
+        return '';
+    }
+
+    return $m[0];
 }
 
 function validateSessionId(string $value): string

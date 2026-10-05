@@ -81,7 +81,9 @@ try {
     exit;
 } catch (\Throwable $e) {
     $store->delete($sessionId);
-    errorResponse(500, 'start_failed', 'Start konnte nicht vorbereitet werden: ' . $e->getMessage());
+    // Details nur ins Server-Log; der Client erhaelt eine neutrale Meldung.
+    error_log('OAuth2-Broker start ' . $sessionId . ': ' . $e->getMessage());
+    errorResponse(500, 'start_failed', 'Start konnte nicht vorbereitet werden.');
 }
 
 function generatePkcePair(): array
