@@ -75,6 +75,12 @@ Unter Windows muss der Benutzer, unter dem PHP läuft, Schreibrechte auf `OAuth2
 Die Basiskonfiguration liegt in `config/app.php`. Produktive Werte gehören in `config/app.local.php`, weil diese Datei lokale Secrets enthält und von Git ignoriert wird.
 
 - `apiKeys`: Mapping aus Client-ID zu Secret für Desktop-Clients. Der Client sendet das Secret im Header `X-Api-Key`.
+- `providerHosts`: Hosts, deren Autorisierungs- und Token-Endpunkte der Broker annimmt; exakt (`login.example.com`) oder mit führendem Punkt für die Domain samt Subdomains (`.example.com`). Ist die Liste leer, nimmt der Broker jeden öffentlich erreichbaren https-Host auf Port 443 an und weist nur Hosts ab, die auf private, Loopback- oder reservierte Adressen zeigen. Für den Produktivbetrieb sollte die Liste gesetzt sein. Für die im Delphi-Client hinterlegten Provider passt:
+
+```php
+'providerHosts' => ['.datev.de', '.b4value.net', '.bdr-businessportal.de', '.sgh-net.de', '.quadient-eservices.com', '.ricoh-idx.net'],
+```
+
 - `sessionStore.path`: Speicherort für temporäre Session-Dateien. Standard ist `OAuth2-Broker/session-store`.
 - `sessionStore.defaultTtlSeconds`: Lebensdauer einer begonnenen OAuth2-Session, bevor sie ohne Provider-Antwort abläuft.
 - `sessionStore.cleanupAfterSeconds`: Intervall und Altersgrenze für das Aufräumen veralteter JSON-Dateien.
@@ -123,9 +129,11 @@ Wichtige Felder:
 - `providerScope`: Leerzeichengetrennte Scopes oder Array von Scopes.
 - `extraParams`: Optionale zusätzliche Provider-Parameter. `enableWindowsSso=true` wird gesondert unterstützt.
 
+Alle URLs müssen `https` verwenden (`providerRedirectUri` für lokale Tests auch `http://localhost` bzw. `http://127.0.0.1`). Autorisierungs- und Token-Endpunkt prüft der Broker zusätzlich gegen `providerHosts` bzw. auf interne Adressen, denn den Token-Endpunkt ruft er im Callback selbst auf. Weiterleitungen des Token-Endpunkts folgt er nicht.
+
 ### `GET /callback`
 
-Wird vom OAuth2-Provider nach der Anmeldung aufgerufen. Der Broker prüft `state`, tauscht `code` gegen Tokens und speichert das Ergebnis im `session-store`. Dieser Endpunkt wird normalerweise nicht manuell aufgerufen.
+Wird vom OAuth2-Provider nach der Anmeldung aufgerufen. Der Broker prüft `state`, ob die Session noch offen (`pending`) und nicht abgelaufen ist, tauscht `code` gegen Tokens und speichert das Ergebnis im `session-store`. Ein zweiter Aufruf für dieselbe Session wird abgewiesen. Bei technischen Fehlern erhält der Client nur eine neutrale Meldung, die Einzelheiten landen im PHP-Fehlerlog des Servers. Dieser Endpunkt wird normalerweise nicht manuell aufgerufen.
 
 ### `GET /poll?sessionId=...`
 
@@ -172,11 +180,13 @@ Nach `success` oder `error` löscht `/poll` die Session-Datei. Tokens werden dad
 
 ## Fehlerfälle
 
-Fehlerantworten sind JSON-Objekte mit `error` und `message`.
+Fehlerantworten sind JSON-Objekte mit `error` und `message`. Alle JSON-Antworten tragen `Cache-Control: no-store`.
 
 - `401 missing_api_key`: Header `X-Api-Key` fehlt.
 - `401 invalid_api_key`: API-Key passt zu keinem Eintrag in `apiKeys`.
 - `400 missing_parameter`: Pflichtfeld im `/start`-Request fehlt.
+- `400 invalid_parameter`: Feld ist leer oder eine URL wird abgewiesen (kein https, anderer Port als 443, Host nicht in `providerHosts` oder interne Adresse).
+- `500 start_failed`: Der Flow konnte nicht vorbereitet werden; Details stehen im PHP-Fehlerlog.
 - `400 invalid_session_id`: `sessionId` ist leer oder enthält nicht erlaubte Zeichen.
 - `409 session_exists`: Eine Session mit dieser ID existiert bereits.
 - `404 unknown_session`: `/poll` findet keine Session für die ID.

@@ -2,6 +2,7 @@
 
 namespace Landrix\OAuth2;
 
+use GuzzleHttp\Client as HttpClient;
 use League\OAuth2\Client\OptionProvider\HttpBasicAuthOptionProvider;
 use League\OAuth2\Client\Provider\GenericProvider;
 
@@ -20,6 +21,16 @@ class LandrixOAuthProvider extends GenericProvider
 
         if (!isset($collaborators['optionProvider'])) {
             $collaborators['optionProvider'] = new HttpBasicAuthOptionProvider();
+        }
+
+        // Keine Weiterleitungen folgen: Der Token-Endpunkt ist geprueft, ein
+        // Redirect koennte den Serverrequest sonst auf ein internes Ziel lenken.
+        if (!isset($collaborators['httpClient'])) {
+            $collaborators['httpClient'] = new HttpClient([
+                'allow_redirects' => false,
+                'timeout' => 20,
+                'connect_timeout' => 10,
+            ]);
         }
 
         parent::__construct($options, $collaborators);
