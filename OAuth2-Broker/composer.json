@@ -1,0 +1,7 @@
+{
+    "require": {
+        "php": ">=8.2",
+        "league/oauth2-client": "2.9.0",
+        "lcobucci/jwt": "5.6"
+    }
+}
