@@ -16,7 +16,7 @@ Wer TIA in die eigene Software einbauen und die DATEV-Produktionsfreigabe erreic
 - PHP 8.2 oder neuer für den OAuth2-Broker.
 - Composer für die PHP-Abhängigkeiten.
 - Webserver mit PHP-Unterstützung oder PHPs eingebauter Server für lokale Smoke-Tests.
-- Delphi mit VCL und WebView2-Unterstützung für das Sample-Projekt. Erstellt und getestet mit Delphi 12 Athens; die Bibliothek selbst braucht mindestens Delphi 10.3 (Inline-Variablen) und `System.Net.HttpClient`.
+- Delphi mit VCL und WebView2-Unterstützung für das Sample-Projekt. Erstellt und getestet mit Delphi 13.2 Florence; die Bibliothek selbst braucht mindestens Delphi 10.3 (Inline-Variablen) und `System.Net.HttpClient`.
 - Für das Sample zusätzlich [XRechnung-for-Delphi](https://github.com/LandrixSoftware/XRechnung-for-Delphi) (erzeugt die Testrechnungen). Das Projekt erwartet es als Nachbarverzeichnis `src-XRechnung-for-Delphi` neben diesem Repository; sonst den Suchpfad in `TIAProject.dproj` anpassen. Die Clientbibliothek (`intf.TRAFFIQX*.pas`) selbst hat keine Abhängigkeiten außerhalb der Delphi-RTL.
 - Provider-Zugangsdaten und Redirect-URI für DATEV/TRAFFIQX oder einen kompatiblen OAuth2-Provider.
 
