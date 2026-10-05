@@ -1,0 +1,47 @@
+# .gitignore
+OAuth2-Broker/config/app.local.php
+OAuth2-Broker/composer.phar
+OAuth2-Broker/composer-setup.php
+OAuth2-Broker/vendor/
+OAuth2-Broker/session-store/*.json
+
+.env
+.env.*
+!.env.example
+helper/
+doc/
+attic/
+api/
+__history/
+__recovery/
+Win32/
+*.~*
+*.dsk
+*.dcu
+*.local
+*.exe
+client/cfg.ini
+README-old.md
+Features.md
+
+.vscode/
+GPATH
+GRTAGS
+GTAGS
+client/http-log/
+
+# Deployment- und Sync-Konfigurationen (enthalten Zugangsdaten)
+*.ffs_gui
+*.ffs_batch
+
+# Delphi-Build
+Win64/
+*.identcache
+*.stat
+
+# Logs, Schluessel, Zertifikate
+*.log
+*.pem
+*.key
+*.pfx
+*.p12
