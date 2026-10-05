@@ -20,7 +20,7 @@ Dieser Leitfaden richtet sich an Entwickler, die die TRAFFIQX Invoice API (TIA) 
 | 8 | Postausgang | `UploadStructuredData`, `WaitForOutboxDocumentSent`, `DownloadOutboxDocument` |
 | 9 | Fehler anzeigen | `TTraffiqxInboxErrorHelper` |
 | 10 | HTTP-Protokoll und Fehlerquote | `intf.TRAFFIQXHttpLog.pas` |
-| 11 | Abnahmetermin vorbereiten | [`Abnahme.md`](Abnahme.md), Abschnitt 5 |
+| 11 | Abnahmetermin vorbereiten | [`Abnahme.md`](Abnahme.md), Abschnitt 7 |
 
 ## 1. App bei DATEV registrieren
 
@@ -183,7 +183,7 @@ DATEV verlangt ein technisches Protokoll aller Aufrufe, mindestens 14 Tage aufbe
 
 ## 11. Abnahmetermin vorbereiten
 
-- **Checkliste:** [`Abnahme.md`](Abnahme.md) Abschnitt 5 Punkt für Punkt durchgehen.
+- **Checkliste:** [`Abnahme.md`](Abnahme.md) Abschnitt 7 Punkt für Punkt durchgehen.
 - **Challenges im Postausgang:** eine E-Rechnung je Kanal (E-Mail, TRAFFIQX, Peppol) bis `sent` und mindestens eine bis `error`. Dafür werden Empfänger außerhalb des eigenen Datenbestands gebraucht (siehe Abschnitt 8); am einfachsten ein zweiter, eigener DATEV-Bestand mit eigener E-Mail-Empfangsadresse, TRAFFIQX-ID und Peppol-ID.
 - **Architektur erklären können.** Bewährt hat sich, diese Punkte schriftlich vorzubereiten:
   - welche Programme es gibt und wo sie laufen,

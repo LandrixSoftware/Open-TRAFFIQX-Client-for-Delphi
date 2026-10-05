@@ -49,19 +49,19 @@ Folgende Use Cases können mit der API umgesetzt werden:
 3. Metadaten eines Dokuments abfragen
 4. Status vom Postausgang abfragen
 
-## 2. Vorgaben für Sandbox
+## 3. Vorgaben für Sandbox
 
 Base URL: `https://traffiqx-invoice.api.datev.de/platform-sandbox/v0` (Stand des DATEV-Dokuments; der Client nutzt API-Version `/v1`: `…/platform-sandbox/v1`)
 
 Die Vorgaben unterscheiden nachfolgend nach Inbox und Outbox. Je nachdem, welche Bereiche die 3rd-Party-App benötigt, sind die entsprechenden Vorgaben einzuhalten. Die Vorgaben umschreiben den typischen API-Workflow im jeweiligen Bereich.
 
-### 2.1. API-Workflow für Inbox
+### 3.1. API-Workflow für Inbox
 
 1. Status vom Posteingang abfragen
 2. Metadaten eines Dokuments abfragen
 3. Download eines Dokuments
 
-#### 2.1.1. Status vom Posteingang abfragen
+#### 3.1.1. Status vom Posteingang abfragen
 
 ```http
 GET /traffiqx-clients/{traffiqx_id}/inbox-documents
@@ -72,7 +72,7 @@ Mit diesem Endpunkt kann sich die Drittanwendung einen Überblick über den Post
 - MUST: Der Status vom Posteingang ist mit dem Status der Drittanwendung initial bzw. einmalig zu synchronisieren und von da an synchron zu halten.
 - MUST: Die `document_id` muss entlang des Lebenszyklus eines Dokuments für den Kunden einsehbar sein.
 
-#### 2.1.2. Metadaten eines Dokuments abfragen
+#### 3.1.2. Metadaten eines Dokuments abfragen
 
 ```http
 GET /traffiqx-clients/{traffiqx_id}/inbox-documents/{document_id}/metadata
@@ -83,7 +83,7 @@ Mit diesem Endpunkt kann man ergänzende Informationen wie beispielsweise den Va
 - MUST: Der Validierungsstatus von E-Rechnungen, also `document_format` und `en_16931_compliant`, ist dem Kunden präsent anzuzeigen.
 - MUST: Dem Kunden muss darüber informiert werden, wenn invalide E-Rechnungen eingegangen sind.
 
-#### 2.1.3. Download eines Dokuments
+#### 3.1.3. Download eines Dokuments
 
 ```http
 GET /traffiqx-clients/{traffiqx_id}/inbox-documents/{document_id}
@@ -99,14 +99,14 @@ Hiermit ist der Download des Dokuments möglich. Die Bereitstellung seitens der 
 - Zeigen Sie auf, wie in der 3rd-Party-App transparent wird, welche Dokumente im Posteingang der E-Rechnungsplattform eingegangen sind.
 - Übernehmen Sie die noch nicht heruntergeladenen Dokumente und zeigen Sie auf, wie der Kunde die Dokumente über Ihre App einsehen kann und welche Informationen aus der API für den Kunden verfügbar gemacht werden.
 
-### 2.2. API-Workflow für Outbox
+### 3.2. API-Workflow für Outbox
 
 1. Upload eines Dokuments und Verarbeitungsstatus abfragen
 2. Download eines Dokuments
 3. Metadaten eines Dokuments abfragen
 4. Status vom Postausgang abfragen
 
-#### 2.2.1. Upload eines Dokuments und Verarbeitungsstatus abfragen
+#### 3.2.1. Upload eines Dokuments und Verarbeitungsstatus abfragen
 
 ```http
 POST /traffiqx-clients/{traffiqx_id}/outbox/structured-data
@@ -126,7 +126,7 @@ Nach dem Upload ist der Verarbeitungsstatus des Dokuments zu überwachen. Die AP
 - MUST: Die Integration muss alle Statuswerte verarbeiten können und dem Kunden transparent machen.
 - MUST: Pollings am Status-Endpunkt sind auf die Laufzeit eines Access-Tokens zu beschränken.
 
-#### 2.2.2. Download eines Dokuments
+#### 3.2.2. Download eines Dokuments
 
 ```http
 GET /traffiqx-clients/{traffiqx_id}/outbox-documents/{document_id}
@@ -138,7 +138,7 @@ Nach dem erfolgreichen Versand mit `state=sent` muss das Dokument für die GoBD-
 - MUST: Die heruntergeladenen Dokumente müssen dem Kunden visualisiert werden können.
 - MUST: Der Kunde muss in irgendeiner Form darüber aufgeklärt werden, wo die GoBD-konforme Langzeitarchivierung seiner Ausgangsrechnung stattfindet.
 
-#### 2.2.3. Metadaten eines Dokuments abfragen
+#### 3.2.3. Metadaten eines Dokuments abfragen
 
 ```http
 GET /traffiqx-clients/{traffiqx_id}/outbox-documents/{document_id}/metadata
@@ -149,7 +149,7 @@ Zu den versendeten Dokumenten können fachliche Metadaten abgerufen werden. Eine
 - MUST: Der Abruf der Metadaten darf nur dann durchgeführt werden, wenn zuvor der Status `sent` bestätigt wurde.
 - MUST: Die Integration muss den Versandkanal überprüfen, also gewollt versus tatsächlich, und dem Kunden mindestens Versandformat, Versanddatum, Versandkanal, also E-Mail, Traffiqx oder Peppol, sowie Versandadresse, also E-Mail oder ID, anzeigen.
 
-#### 2.2.4. Status vom Postausgang abfragen
+#### 3.2.4. Status vom Postausgang abfragen
 
 ```http
 GET /traffiqx-clients/{traffiqx_id}/outbox-documents
@@ -167,13 +167,13 @@ Der Status vom Postausgang kann für verschiedene Use Cases genutzt werden, zum 
 - Übertragen Sie mindestens eine E-Rechnung und erreichen Sie den Status `error`. Zeigen Sie, wie die Integration auf den Fehler reagiert.
 - Zeigen Sie die übertragenen E-Rechnungen in der 3rd-Party-App und welche Informationen dem Kunden bereitgestellt werden.
 
-## 3. Vorgaben für Produktion
+## 4. Vorgaben für Produktion
 
 Base URL: `https://traffiqx-invoice.api.datev.de/platform/v0` (Stand des DATEV-Dokuments; der Client nutzt API-Version `/v1`: `…/platform/v1`)
 
-Die Anforderungen aus Abschnitt 2, also den Vorgaben für Sandbox, sind identisch für die Produktion. Für die Produktionsfreigabe wird der DATEV-Berater den Entwickler bzw. Softwarehersteller in einen speziellen Testbestand für die DATEV E-Rechnungsplattform einladen. Mittels dieses Testbestands werden dann die einzelnen Vorgaben und Challenges durchlaufen.
+Die Anforderungen aus Abschnitt 3, also den Vorgaben für Sandbox, sind identisch für die Produktion. Für die Produktionsfreigabe wird der DATEV-Berater den Entwickler bzw. Softwarehersteller in einen speziellen Testbestand für die DATEV E-Rechnungsplattform einladen. Mittels dieses Testbestands werden dann die einzelnen Vorgaben und Challenges durchlaufen.
 
-## 4. Umsetzungsnotizen für diese Integration
+## 5. Umsetzungsnotizen für diese Integration
 
 Diese Repository-Struktur passt grundsätzlich gut zu den DATEV-Vorgaben, weil die Zuständigkeiten klar getrennt sind:
 
@@ -270,7 +270,7 @@ Stand nach dem Sandbox-Freigabetermin (September 2026). Für die Produktionsfrei
 - `intf.TRAFFIQXTokenProtection.pas` verschlüsselt Tokens per DPAPI, an den Windows-Benutzer oder an den Rechner gebunden; `Fingerprint` ordnet eine gespeicherte Sitzung einer Anmeldung zu. Wo die Tokens liegen und wer sie erneuert, entscheidet die Anwendung (siehe 6.1: nie mehr als ein gültiges Refresh-Token).
 - Noch offen: Endsession.
 
-## 5. Kompakte Abnahme-Checkliste
+## 7. Kompakte Abnahme-Checkliste
 
 ### Inbetriebnahme
 
