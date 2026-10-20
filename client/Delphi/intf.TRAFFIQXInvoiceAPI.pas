@@ -2487,7 +2487,8 @@ begin
           + ' ... (gekuerzt, ' + Length(AEntry.Body).ToString + ' Zeichen)';
     except
       on E: Exception do
-        AEntry.Body := '(Body nicht lesbar: ' + E.Message + ')';
+        // Nur die Fehlerart: Die Meldung koennte Teile des Bodys enthalten.
+        AEntry.Body := '(Body nicht lesbar: ' + E.ClassName + ')';
     end;
   finally
     if LStream <> nil then
