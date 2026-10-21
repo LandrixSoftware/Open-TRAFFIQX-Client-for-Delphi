@@ -1046,8 +1046,8 @@ begin
   lDocument:= TMemoryStream.Create;
   try
   try
-    //LZugferdPdfPath := TPath.GetFullPath('..\..\..\..\..\testdata\sbsz110-cii-en16931-232.pdf');
-    LZugferdPdfPath := TPath.GetFullPath('..\..\..\..\..\testdata\sbsz120-cii-extended-232.pdf');
+    //EN16931-Referenz: ZUGFeRD EXTENDED lehnt DATEV mit DRAFT_UNSUPPORTED_FORMAT ab
+    LZugferdPdfPath := TPath.GetFullPath('..\..\..\..\..\testdata\sbsz110-cii-en16931-232.pdf');
     if not FileExists(LZugferdPdfPath) then
       raise Exception.Create('Testdatei nicht gefunden: ' + LZugferdPdfPath);
 

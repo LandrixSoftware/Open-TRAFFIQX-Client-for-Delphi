@@ -1118,8 +1118,20 @@ begin
     // Text laut DATEV-Business-Dokumentation (Fehlercodes Postausgang)
     // Beobachtet (Produktion 09/2026): auch eine als XRechnung-Extension
     // deklarierte Rechnung wird mit diesem Code abgelehnt.
+    // Beobachtet (Sandbox 10/2026): ZUGFeRD EXTENDED wird ebenfalls abgelehnt.
     Exit('Die Datei entspricht nicht dem zulaessigen E-Rechnungsformat. Zulaessige Formate: XML CII, XML UBL, ZUGFeRD EN16931, ZUGFeRD XRechnung, XRechnung, Peppol BIS Billing. '
-      + 'Beobachtet: Auch eine als XRechnung-Extension deklarierte Rechnung (CustomizationID mit "extension:xrechnung") wird abgelehnt.');
+      + 'Beobachtet: Auch eine als XRechnung-Extension deklarierte Rechnung (CustomizationID mit "extension:xrechnung") und ZUGFeRD EXTENDED werden abgelehnt.');
+
+  // Beobachtet (Produktion 10/2026, nicht in der Business-Dokumentation),
+  // beide Male beim ZUGFeRD-Upload (zugferd-data):
+  // 1. PDF ist kein gueltiges PDF/A-3 (z. B. Schriftbreiten, Regel 6.2.11.5);
+  // 2. preferred_format "XRechnung" bei ZUGFeRD EN16931 ohne BT-10 - ohne
+  //    Formatwunsch wurde dieselbe Datei versendet.
+  if SameText(AErrorDetails, 'DRAFT_ORIGINAL_VALIDATION_FAILED') then
+    Exit('Die hochgeladene Rechnung wurde bei der Pruefung des Originaldokuments abgelehnt. '
+      + 'Beobachtet beim ZUGFeRD-Upload: das PDF ist kein gueltiges PDF/A-3 (z. B. eingebettete Schriften), '
+      + 'oder als Wunschformat wurde XRechnung angegeben, obwohl die Rechnung keine XRechnung ist (z. B. fehlende Kaeuferreferenz BT-10). '
+      + 'PDF mit einem PDF/A-Validator pruefen und ZUGFeRD ohne Wunschformat hochladen.');
 
   // Beobachtet (Produktion 09/2026, nicht in der Business-Dokumentation):
   // RECEIVER_IS_SENDER_TRAFFIQXID bei einer Rechnung an die eigene TRAFFIQX-ID.
