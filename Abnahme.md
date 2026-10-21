@@ -113,7 +113,7 @@ POST /traffiqx-clients/{traffiqx_id}/outbox/structured-data
 POST /traffiqx-clients/{traffiqx_id}/outbox/zugferd-data
 ```
 
-Für den Versand stehen zwei Upload-Wege zur Verfügung. Für XRechnung wird eine strukturierte XML-Datei im UBL- oder CII-Format zusammen mit einer PDF-Sichtkomponente übertragen. Für ZUGFeRD wird ein PDF im ZUGFeRD-2.x-Format hochgeladen. Nach erfolgreichem Upload liefert die API eine `document_id` sowie einen Link auf das Dokument zurück.
+Für den Versand stehen zwei Upload-Wege zur Verfügung. Für XRechnung wird eine strukturierte XML-Datei im UBL- oder CII-Format zusammen mit einer PDF-Sichtkomponente übertragen. Für ZUGFeRD wird ein PDF im ZUGFeRD-2.x-Format (Profil EN 16931, gültiges PDF/A-3) hochgeladen, ohne Wunschformat XRechnung; die Stolpersteine stehen in [`Integration.md`](Integration.md) Abschnitt 8. Nach erfolgreichem Upload liefert die API eine `document_id` sowie einen Link auf das Dokument zurück.
 
 ```http
 GET /traffiqx-clients/{traffiqx_id}/outbox-documents/{document_id}/status
@@ -334,3 +334,4 @@ Stand nach dem Sandbox-Freigabetermin (September 2026). Für die Produktionsfrei
 | --- | --- | --- |
 | 1.1 | 2026-04-01 | Veröffentlichung |
 | 1.2 | 2026-10-20 | Abschnitt 6 (Produktionsfreigabe: Token-Laufzeiten, Identity-Provider-Endpunkte, Verbindungs-Oberfläche, allgemeine Vorgaben, Stand im Delphi-Client) und Checkliste „Produktion“ ergänzt; Abschnitte fortlaufend nummeriert; technisches HTTP-Protokoll (`intf.TRAFFIQXHttpLog.pas`), verschlüsselte Token-Ablage (`intf.TRAFFIQXTokenProtection.pas`) und Schwärzung von Tokens an ihrer Form beschrieben; Verweise auf `Integration.md`. |
+| 1.3 | 2026-10-21 | ZUGFeRD-Upload: Profil EN 16931, gültiges PDF/A-3, kein Wunschformat XRechnung (Stolpersteine in `Integration.md` Abschnitt 8); Fehlertext zu `DRAFT_ORIGINAL_VALIDATION_FAILED` in der Bibliothek; Sample lädt die EN-16931-Referenz statt EXTENDED. |

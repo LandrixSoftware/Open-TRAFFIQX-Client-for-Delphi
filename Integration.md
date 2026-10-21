@@ -163,6 +163,13 @@ Dafür eignet sich der Fingerabdruck der Anmeldung (`TTraffiqxTokenProtection.Fi
 - **Keine XRechnung-Extension:** Als Extension deklarierte Rechnungen lehnt die Plattform ab (`DRAFT_UNSUPPORTED_FORMAT`).
 - **Vorher validieren:** Die Rechnung vor dem Upload validieren, etwa mit dem KoSIT-Validator. Die Plattform meldet Validierungsfehler nur pauschal.
 
+**Stolpersteine bei ZUGFeRD** (Upload über `UploadZugferdData`, beobachtet im Oktober 2026):
+
+- **Kein Wunschformat XRechnung.** Mit `preferred_format` = `XRechnung` (`pfXRechnung`) lehnte DATEV ein gültiges ZUGFeRD EN 16931 ohne Käuferreferenz (BT-10) mit `CREATION_DOCUMENT_ERROR` / `DRAFT_ORIGINAL_VALIDATION_FAILED` ab. Ohne Wunschformat (`pfNone`) wurde dieselbe Datei versendet.
+- **Gültiges PDF/A-3.** Das PDF muss ein gültiges PDF/A-3 sein, sonst folgt derselbe Fehler. Vor dem Upload prüfen, etwa mit Mustang (`--action validate`), das die XML und das PDF/A gemeinsam prüft. Mit wPDF (WPCubed) die Schriften als `wpEmbedCIDFonts` einbetten: Die TrueType-Modi, auch die Teilmengen, verletzen Regel 6.2.11.5 (Breitenangaben passen nicht zum eingebetteten Schriftprogramm).
+- **Nur EN 16931.** ZUGFeRD EXTENDED lehnt die Plattform ab (`DRAFT_UNSUPPORTED_FORMAT`).
+- **Sandbox-Marker vorher setzen.** Die Sandbox braucht `SBSZ:nnn` in BT-23. Bei ZUGFeRD steckt die XML im PDF, der Marker muss also schon beim Erzeugen gesetzt sein. Ein fertiges PDF lässt sich nicht nachträglich umstellen.
+
 ## 9. Fehler anzeigen
 
 - Die TIA-Fehlerantworten sind RFC-7807-ProblemDetails. Bei 4xx-Fehlern mindestens die Hilfe-URL anzeigen (MUST). `TTraffiqxInboxErrorHelper.HelpUrl(Error)` liefert sie, `BuildUserMessage` einen Text für den Kunden.
