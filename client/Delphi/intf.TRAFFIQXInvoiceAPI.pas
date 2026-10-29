@@ -1563,6 +1563,7 @@ function TTRAFFIQXInvoiceAPI.TryFetchWellKnownEndpoints: Boolean;
 var
   LHttpClient: TNetHTTPClient;
   LResponse: IHTTPResponse;
+  LJsonValue: TJSONValue;
   LJson: TJSONObject;
   LAuthEndpoint, LTokenEndpoint, LRevocationEndpoint: string;
   LUserInfoEndpoint, LIntrospectionEndpoint: string;
@@ -1583,11 +1584,12 @@ begin
     if (LResponse = nil) or (LResponse.StatusCode < 200) or (LResponse.StatusCode >= 400) then
       Exit;
 
-    LJson := TJSONObject.ParseJSONValue(LResponse.ContentAsString(TEncoding.UTF8)) as TJSONObject;
-    if LJson = nil then
-      Exit;
-
+    LJsonValue := TJSONObject.ParseJSONValue(LResponse.ContentAsString(TEncoding.UTF8));
     try
+      if not (LJsonValue is TJSONObject) then
+        Exit;
+      LJson := TJSONObject(LJsonValue);
+
       LAuthEndpoint := '';
       LTokenEndpoint := '';
       LRevocationEndpoint := '';
@@ -1612,7 +1614,7 @@ begin
 
       Result := (LAuthEndpoint <> '') and (LTokenEndpoint <> '');
     finally
-      LJson.Free;
+      LJsonValue.Free;
     end;
   finally
     LHttpClient.Free;
@@ -2866,6 +2868,7 @@ begin
       LHttpClient: TNetHTTPClient;
       LHeaders: TNetHeaders;
       LResponse: IHTTPResponse;
+      LJsonValue: TJSONValue;
       LJson: TJSONObject;
       LStatus: string;
       LTokens: TJSONObject;
@@ -2916,11 +2919,12 @@ begin
               'http_' + LResponse.StatusCode.ToString,
               LResponse.ContentAsString(TEncoding.UTF8)));
 
-          LJson := TJSONObject.ParseJSONValue(
-            LResponse.ContentAsString(TEncoding.UTF8)) as TJSONObject;
+          LJsonValue := TJSONObject.ParseJSONValue(
+            LResponse.ContentAsString(TEncoding.UTF8));
           try
-            if LJson = nil then
+            if not (LJsonValue is TJSONObject) then
               Exit(TTraffiqxPollResult.Fail('invalid_json', 'Antwort konnte nicht gelesen werden.'));
+            LJson := TJSONObject(LJsonValue);
 
             if not LJson.TryGetValue<string>('status', LStatus) then
               LStatus := '';
@@ -3019,7 +3023,7 @@ begin
 
             Exit(TTraffiqxPollResult.Fail('unknown_status', 'Status: ' + LStatus));
           finally
-            LJson.Free;
+            LJsonValue.Free;
           end;
         end;
       finally
@@ -3070,6 +3074,7 @@ var
   HttpClient: TNetHTTPClient;
   RequestStream: TStringStream;
   Response: IHTTPResponse;
+  ResponseJSONValue: TJSONValue;
   ResponseJSON: TJSONObject;
   Headers: TNetHeaders;
   Base64NoBreaks: TBase64Encoding;
@@ -3098,16 +3103,19 @@ var
 
   function BuildRefreshErrorMessage(const AResponseText: string): string;
   var
+    LJsonValue: TJSONValue;
     LJson: TJSONObject;
     LErrorCode: string;
     LErrorDescription: string;
   begin
     Result := 'Fehler beim Abrufen des Access Tokens: ' + AResponseText;
 
-    LJson := TJSONObject.ParseJSONValue(AResponseText) as TJSONObject;
-    if LJson = nil then
-      Exit;
+    LJsonValue := TJSONObject.ParseJSONValue(AResponseText);
     try
+      if not (LJsonValue is TJSONObject) then
+        Exit;
+      LJson := TJSONObject(LJsonValue);
+
       LErrorCode := '';
       LErrorDescription := '';
       LJson.TryGetValue<string>('error', LErrorCode);
@@ -3131,7 +3139,7 @@ var
         end;
       end;
     finally
-      LJson.Free;
+      LJsonValue.Free;
     end;
   end;
 begin
@@ -3146,7 +3154,7 @@ begin
   HttpClient := TNetHTTPClient.Create(nil);
   RequestStream := TStringStream.Create('', TEncoding.UTF8);
   Base64NoBreaks := TBase64Encoding.Create(0);
-  ResponseJSON := nil;
+  ResponseJSONValue := nil;
   try
     // DATEV erwartet Basic Auth fuer den Token-Endpoint
     if FClientSecret <> '' then
@@ -3168,9 +3176,10 @@ begin
     if Response.StatusCode = 200 then
     begin
       // Parse die JSON-Antwort
-      ResponseJSON := TJSONObject.ParseJSONValue(LResponseText) as TJSONObject;
-      if ResponseJSON = nil then
+      ResponseJSONValue := TJSONObject.ParseJSONValue(LResponseText);
+      if not (ResponseJSONValue is TJSONObject) then
         raise Exception.Create('Antwort des Token-Endpoints konnte nicht als JSON gelesen werden: ' + LResponseText);
+      ResponseJSON := TJSONObject(ResponseJSONValue);
 
       // Sicher auslesen
       if ResponseJSON.TryGetValue<string>('access_token', FAccessToken)
@@ -3200,7 +3209,7 @@ begin
       //400 {"error":"invalid_grant","error_description":"Maximum allowed refresh token reuse exceeded"}
 
   finally
-    ResponseJSON.Free;
+    ResponseJSONValue.Free;
     Base64NoBreaks.Free;
     RequestStream.Free;
     HttpClient.Free;
@@ -3515,7 +3524,7 @@ var
   LForm: TMultipartFormData;
   Response: IHTTPResponse;
   LUrl: string;
-  LJson: TJSONObject;
+  LJson: TJSONValue;
 begin
   Result := False; AResult := nil; AError := nil;
   if (FApiBaseUri = '') or (FTRAFFIQXId = '') or (FAccessToken = '') or (FClientId = '') then
@@ -3540,10 +3549,10 @@ begin
     Response := HttpPostForm(HttpClient, LUrl, LForm, tbOnError);
     if Response.StatusCode <> 201 then
     begin
-      LJson := TJSONObject.ParseJSONValue(Response.ContentAsString(TEncoding.UTF8)) as TJSONObject;
+      LJson := TJSONObject.ParseJSONValue(Response.ContentAsString(TEncoding.UTF8));
       try
         if LJson is TJSONObject then
-          AError := TTraffiqxError.FromJson(LJson)
+          AError := TTraffiqxError.FromJson(TJSONObject(LJson))
         else
           AError := MakeError('#HTTP' + Response.StatusCode.ToString, Response.StatusCode, Response.ContentAsString(TEncoding.UTF8));
       finally
@@ -3552,9 +3561,15 @@ begin
       Exit;
     end;
 
-    LJson := TJSONObject.ParseJSONValue(Response.ContentAsString(TEncoding.UTF8)) as TJSONObject;
+    LJson := TJSONObject.ParseJSONValue(Response.ContentAsString(TEncoding.UTF8));
     try
-      AResult := TTraffiqxUploadResult.FromJson(LJson);
+      if not (LJson is TJSONObject) then
+      begin
+        // Hochgeladen, aber ohne lesbare document_id: nicht als stiller Fehlschlag melden
+        AError := MakeError('#PARSE', Response.StatusCode, 'Upload angenommen (HTTP ' + Response.StatusCode.ToString + '), aber die Antwort enthaelt keine lesbare document_id. Nicht erneut senden, sondern den Status in der Plattform pruefen. Antwort: ' + Copy(Response.ContentAsString(TEncoding.UTF8), 1, 500));
+        Exit;
+      end;
+      AResult := TTraffiqxUploadResult.FromJson(TJSONObject(LJson));
       Result := AResult <> nil;
     finally
       LJson.Free;
@@ -3572,7 +3587,7 @@ var
   LForm: TMultipartFormData;
   Response: IHTTPResponse;
   LUrl: string;
-  LJson: TJSONObject;
+  LJson: TJSONValue;
 begin
   Result := False; AResult := nil; AError := nil;
   if (FApiBaseUri = '') or (FTRAFFIQXId = '') or (FAccessToken = '') or (FClientId = '') then
@@ -3598,10 +3613,10 @@ begin
     Response := HttpPostForm(HttpClient, LUrl, LForm, tbOnError);
     if Response.StatusCode <> 201 then
     begin
-      LJson := TJSONObject.ParseJSONValue(Response.ContentAsString(TEncoding.UTF8)) as TJSONObject;
+      LJson := TJSONObject.ParseJSONValue(Response.ContentAsString(TEncoding.UTF8));
       try
         if LJson is TJSONObject then
-          AError := TTraffiqxError.FromJson(LJson)
+          AError := TTraffiqxError.FromJson(TJSONObject(LJson))
         else
           AError := MakeError('#HTTP' + Response.StatusCode.ToString, Response.StatusCode, Response.ContentAsString(TEncoding.UTF8));
       finally
@@ -3610,9 +3625,15 @@ begin
       Exit;
     end;
 
-    LJson := TJSONObject.ParseJSONValue(Response.ContentAsString(TEncoding.UTF8)) as TJSONObject;
+    LJson := TJSONObject.ParseJSONValue(Response.ContentAsString(TEncoding.UTF8));
     try
-      AResult := TTraffiqxUploadResult.FromJson(LJson);
+      if not (LJson is TJSONObject) then
+      begin
+        // Hochgeladen, aber ohne lesbare document_id: nicht als stiller Fehlschlag melden
+        AError := MakeError('#PARSE', Response.StatusCode, 'Upload angenommen (HTTP ' + Response.StatusCode.ToString + '), aber die Antwort enthaelt keine lesbare document_id. Nicht erneut senden, sondern den Status in der Plattform pruefen. Antwort: ' + Copy(Response.ContentAsString(TEncoding.UTF8), 1, 500));
+        Exit;
+      end;
+      AResult := TTraffiqxUploadResult.FromJson(TJSONObject(LJson));
       Result := AResult <> nil;
     finally
       LJson.Free;
