@@ -1,7 +1,7 @@
 ﻿object MiniAppMainForm: TMiniAppMainForm
   Left = 0
   Top = 0
-  Caption = 'TIA Mini-Anwendung – Stammdaten und Ausgang (S1/S2)'
+  Caption = 'TIA Mini-Anwendung – DATEV-Verbindung und Rechnungen (S1–S3)'
   ClientHeight = 820
   ClientWidth = 1040
   Constraints.MinHeight = 600
@@ -23,14 +23,151 @@
     TabOrder = 0
     object ConnectionTab: TTabSheet
       Caption = 'Verbindung'
-      object ConnectionHint: TLabel
-        Align = alTop
-        AutoSize = False
-        Height = 36
-        Top = 0
-        Caption = 'folgt in Scheibe S3'
-        WordWrap = True
-        Layout = tlCenter
+      object ConnectionScroll: TScrollBox
+        Align = alClient
+        BorderStyle = bsNone
+        HorzScrollBar.Visible = False
+        object ConnectionHint: TLabel
+          Align = alTop
+          Top = 0
+          AutoSize = False
+          Height = 44
+          Caption = 'Provider: DATEV E-Rechnungsplattform. Vor dem Umgebungswechsel die bestehende Verbindung trennen.'
+          WordWrap = True
+          Layout = tlCenter
+        end
+        object ConnectionEnvironmentPanel: TPanel
+          Align = alTop
+          Top = 44
+          Height = 44
+          BevelOuter = bvNone
+          object ConnectionEnvironmentLabel: TLabel
+            Left = 8
+            Top = 12
+            Caption = 'Umgebung'
+          end
+          object ConnectionEnvironmentCombo: TComboBox
+            Left = 150
+            Top = 8
+            Width = 220
+            Style = csDropDownList
+            Items.Strings = (
+              'Sandbox'
+              'Produktion')
+            OnChange = EnvironmentChanged
+          end
+        end
+        object ConnectionIdentity: TLabel
+          Align = alTop
+          Top = 88
+          AutoSize = False
+          Height = 32
+          Caption = 'TRAFFIQX-ID:'
+          WordWrap = True
+          Layout = tlCenter
+        end
+        object ConnectionConfigHint: TLabel
+          Align = alTop
+          Top = 120
+          AutoSize = False
+          Height = 60
+          Caption = 'Pflege der Client-Daten in .env (neben der EXE, sonst Repo-Wurzel): PROVIDER_TPDATEV_TRAFFIQX_ID. Danach neu starten. Umgebung wird in den Stammdaten gespeichert.'
+          WordWrap = True
+          Layout = tlCenter
+        end
+        object ConnectionStatusPanel: TPanel
+          Align = alTop
+          Top = 180
+          Height = 44
+          BevelOuter = bvNone
+          object ConnectionLamp: TShape
+            Left = 8
+            Top = 10
+            Width = 24
+            Height = 24
+            Shape = stCircle
+            Brush.Color = clRed
+          end
+          object ConnectionStatus: TLabel
+            AlignWithMargins = True
+            Margins.Left = 44
+            Align = alClient
+            AutoSize = False
+            Caption = 'Nicht verbunden'
+            WordWrap = True
+            Layout = tlCenter
+          end
+        end
+        object ConnectionExpiry: TLabel
+          Align = alTop
+          Top = 224
+          AutoSize = False
+          Height = 32
+          Caption = 'Refresh-Token gültig bis: –'
+          WordWrap = True
+          Layout = tlCenter
+        end
+        object ConnectionUser: TLabel
+          Align = alTop
+          Top = 256
+          AutoSize = False
+          Height = 44
+          Caption = 'Person: noch nicht verfügbar'
+          WordWrap = True
+          Layout = tlCenter
+        end
+        object ConnectionButtons: TFlowPanel
+          Align = alTop
+          Top = 300
+          Height = 88
+          BevelOuter = bvNone
+          object ConnectButton: TButton
+            AlignWithMargins = True
+            Width = 190
+            Height = 32
+            Caption = 'Mit DATEV verbinden'
+            OnClick = ConnectClick
+          end
+          object CancelConnectButton: TButton
+            AlignWithMargins = True
+            Width = 190
+            Height = 32
+            Caption = 'Abbrechen'
+            OnClick = CancelConnectClick
+          end
+          object CheckConnectionButton: TButton
+            AlignWithMargins = True
+            Width = 190
+            Height = 32
+            Caption = 'Verbindung prüfen'
+            OnClick = CheckConnectionClick
+          end
+          object DisconnectButton: TButton
+            AlignWithMargins = True
+            Width = 190
+            Height = 32
+            Caption = 'Verbindung trennen'
+            OnClick = DisconnectClick
+          end
+        end
+        object ConnectedAppsLink: TLinkLabel
+          Align = alTop
+          Top = 388
+          AutoSize = False
+          Height = 32
+          Caption = '<a href="apps">Verbundene Anwendungen</a> (DATEV)'
+          OnLinkClick = ConnectionLinkClick
+        end
+        object ConnectionHelpLink: TLinkLabel
+          Align = alTop
+          Top = 420
+          AutoSize = False
+          Height = 32
+          Caption = '<a href="help">Hilfe zum letzten API-Fehler öffnen</a> – Details im Protokoll'
+          ShowHint = True
+          Visible = False
+          OnLinkClick = ConnectionLinkClick
+        end
       end
     end
     object MasterDataTab: TTabSheet
@@ -1095,9 +1232,19 @@
         AutoSize = False
         Height = 36
         Top = 0
-        Caption = 'folgt in Scheibe S7'
+        Caption = 'Service-Meldungen; HTTP-Protokoll in Daten\httplog (14 Tage). Fehlerquote folgt in S7.'
         WordWrap = True
         Layout = tlCenter
+      end
+      object ProtocolHelpLink: TLinkLabel
+        Align = alTop
+        Top = 36
+        AutoSize = False
+        Height = 32
+        Caption = '<a href="help">Hilfe zum letzten API-Fehler öffnen</a>'
+        ShowHint = True
+        Visible = False
+        OnLinkClick = ConnectionLinkClick
       end
       object ProtocolMemo: TMemo
         Align = alClient
@@ -1106,5 +1253,11 @@
         WordWrap = False
       end
     end
+  end
+  object ConnectionTimer: TTimer
+    Interval = 1000
+    OnTimer = ConnectionTimerTick
+    Left = 960
+    Top = 8
   end
 end

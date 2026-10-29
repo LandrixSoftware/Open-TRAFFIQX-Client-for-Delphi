@@ -26,6 +26,7 @@ uses
   MiniApp.MainForm in 'MiniApp.MainForm.pas' {MiniAppMainForm},
   MiniApp.Model in 'MiniApp.Model.pas',
   MiniApp.Storage in 'MiniApp.Storage.pas',
+  MiniApp.Service in 'MiniApp.Service.pas',
   MiniApp.InvoiceBuilder in 'MiniApp.InvoiceBuilder.pas';
 
 // Wird beim IDE-/MSBuild-Projektbuild aus der .dproj erzeugt.

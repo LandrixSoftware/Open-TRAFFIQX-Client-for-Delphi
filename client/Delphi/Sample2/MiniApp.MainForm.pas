@@ -25,15 +25,32 @@ interface
 
 uses
   System.SysUtils, System.Classes, Vcl.Controls, Vcl.Forms, Vcl.StdCtrls,
-  Vcl.ExtCtrls, Vcl.ComCtrls, Vcl.Mask, MiniApp.Model, MiniApp.Storage;
+  Vcl.ExtCtrls, Vcl.ComCtrls, Vcl.Mask, MiniApp.Model, MiniApp.Storage, MiniApp.Service;
 
 type
-  TMiniAppLogKind = (lkInfo, lkWarning, lkError);
-
   TMiniAppMainForm = class(TForm)
     Pages: TPageControl;
     ConnectionTab: TTabSheet;
     ConnectionHint: TLabel;
+    ConnectionScroll: TScrollBox;
+    ConnectionEnvironmentPanel: TPanel;
+    ConnectionEnvironmentLabel: TLabel;
+    ConnectionEnvironmentCombo: TComboBox;
+    ConnectionIdentity: TLabel;
+    ConnectionConfigHint: TLabel;
+    ConnectionStatusPanel: TPanel;
+    ConnectionLamp: TShape;
+    ConnectionStatus: TLabel;
+    ConnectionExpiry: TLabel;
+    ConnectionUser: TLabel;
+    ConnectionButtons: TFlowPanel;
+    ConnectButton: TButton;
+    CancelConnectButton: TButton;
+    CheckConnectionButton: TButton;
+    DisconnectButton: TButton;
+    ConnectedAppsLink: TLinkLabel;
+    ConnectionHelpLink: TLinkLabel;
+    ConnectionTimer: TTimer;
     MasterDataTab: TTabSheet;
     SavePanel: TPanel;
     SaveButton: TButton;
@@ -146,6 +163,7 @@ type
     IncomingHint: TLabel;
     ProtocolTab: TTabSheet;
     ProtocolHint: TLabel;
+    ProtocolHelpLink: TLinkLabel;
     ProtocolMemo: TMemo;
     procedure FormCreate(Sender: TObject);
     procedure FormCloseQuery(Sender: TObject; var CanClose: Boolean);
@@ -167,9 +185,18 @@ type
     procedure ShowXmlClick(Sender: TObject);
     procedure OpenFolderClick(Sender: TObject);
     procedure ValidateInvoiceClick(Sender: TObject);
+    procedure ConnectClick(Sender: TObject);
+    procedure CancelConnectClick(Sender: TObject);
+    procedure CheckConnectionClick(Sender: TObject);
+    procedure DisconnectClick(Sender: TObject);
+    procedure ConnectionLinkClick(Sender: TObject; const Link: string; LinkType: TSysLinkType);
+    procedure ConnectionTimerTick(Sender: TObject);
   private
     FData: TMiniAppData;
     FClientConfig: TMiniAppClientConfig;
+    FService: TMiniAppService;
+    FServiceBusy: Boolean;
+    FPreviousCursor: TCursor;
     FUpdating: Boolean;
     FDirty: Boolean;
     FCustomerDirty: Boolean;
@@ -194,9 +221,11 @@ type
     function SelectedInvoiceNumber: string;
     procedure OpenLocalPath(const APath: string);
     procedure ValidationError(const AMessage: string);
+    procedure UpdateConnection;
+    function ConfirmLoginUnconfirmed: Boolean;
   public
     destructor Destroy; override;
-    // S1: Aufruf im Hauptthread; später Service-Callbacks per TThread.Queue.
+    // S3: ausschließlich Hauptthread, auch die Service-Abschlussmeldung.
     procedure Log(const AText: string; AKind: TMiniAppLogKind = lkInfo);
   end;
 
@@ -206,7 +235,7 @@ var
 implementation
 
 uses
-  Vcl.Dialogs, System.UITypes, System.IOUtils, Winapi.Windows, Winapi.ShellAPI,
+  Vcl.Dialogs, Vcl.Graphics, System.UITypes, System.IOUtils, Winapi.Windows, Winapi.ShellAPI,
   intf.XRechnungValidationHelperJava;
 
 {$R *.dfm}
@@ -255,11 +284,19 @@ begin
     if FClientConfig.SourceFile = '' then
       Log('Keine .env gefunden. Stammdaten können ohne Client-Konfiguration bearbeitet werden.', lkWarning)
     else
-      Log('Client-Konfiguration geladen; Verbindung folgt in Scheibe S3.');
+      Log('Client-Konfiguration geladen.');
   except
     // Niemals Konfigurationswerte oder Zugangsdaten in das Protokoll übernehmen.
     Log('Client-Konfiguration konnte nicht gelesen werden. Bitte .env prüfen.', lkWarning);
   end;
+  FService := TMiniAppService.Create(FClientConfig, FData.Environment,
+    procedure(const AText: string; AKind: TMiniAppLogKind)
+    begin
+      Log(AText, AKind);
+    end);
+  FService.OnChanged := UpdateConnection;
+  FService.OnConfirmLoginUnconfirmed := ConfirmLoginUnconfirmed;
+  UpdateConnection;
   ValidateInvoiceButton.Enabled := FClientConfig.XRechnungDistributionDir <> '';
   OutgoingShow(nil);
 end;
@@ -267,6 +304,9 @@ end;
 destructor TMiniAppMainForm.Destroy;
 begin
   FUpdating := True;
+  FreeAndNil(FService);
+  if FServiceBusy then
+    Screen.Cursor := FPreviousCursor;
   FreeAndNil(FData);
   inherited;
 end;
@@ -311,16 +351,30 @@ begin
 end;
 
 procedure TMiniAppMainForm.EnvironmentChanged(Sender: TObject);
+var
+  LEnvironment: TMiniAppEnvironment;
 begin
   if FUpdating then
     Exit;
-  if EnvironmentCombo.ItemIndex = Ord(meProduction) then
+  if (FService <> nil) and not FService.CanChangeEnvironment then
+  begin
+    EnvironmentCombo.ItemIndex := Ord(FService.Environment);
+    ConnectionEnvironmentCombo.ItemIndex := Ord(FService.Environment);
+    Exit;
+  end;
+  LEnvironment := TMiniAppEnvironment(TComboBox(Sender).ItemIndex);
+  if LEnvironment = meProduction then
     if MessageDlg('Produktion verarbeitet echte Rechnungen. Die Beispieldaten sind dafür ungeeignet. ' +
       'Trotzdem auf Produktion umschalten?', mtWarning, [mbYes, mbNo], 0) <> mrYes then
     begin
       EnvironmentCombo.ItemIndex := Ord(meSandbox);
+      ConnectionEnvironmentCombo.ItemIndex := Ord(meSandbox);
       Exit;
     end;
+  EnvironmentCombo.ItemIndex := Ord(LEnvironment);
+  ConnectionEnvironmentCombo.ItemIndex := Ord(LEnvironment);
+  if FService <> nil then
+    FService.SetEnvironment(LEnvironment);
   MarkDirty;
 end;
 
@@ -1020,15 +1074,167 @@ end;
 procedure TMiniAppMainForm.FormCloseQuery(Sender: TObject; var CanClose: Boolean);
 begin
   CanClose := True;
-  if not FDirty then
+  if FDirty then
+    case MessageDlg('Änderungen vor dem Schließen speichern?', mtConfirmation,
+      [mbYes, mbNo, mbCancel], 0) of
+      mrYes: CanClose := SaveData;
+      mrNo: CanClose := True;
+    else
+      CanClose := False;
+    end;
+  if CanClose and (FService <> nil) then
+    FService.CancelConnect;
+end;
+
+procedure TMiniAppMainForm.UpdateConnection;
+begin
+  if FService = nil then
     Exit;
-  case MessageDlg('Änderungen vor dem Schließen speichern?', mtConfirmation,
-    [mbYes, mbNo, mbCancel], 0) of
-    mrYes: CanClose := SaveData;
-    mrNo: CanClose := True;
+  // Kein ProcessMessages: insbesondere der Polling-Handler bleibt nicht-reentrant.
+  if FService.Busy and not FServiceBusy then
+  begin
+    FPreviousCursor := Screen.Cursor;
+    Screen.Cursor := crHourGlass;
+  end
+  else if not FService.Busy and FServiceBusy then
+    Screen.Cursor := FPreviousCursor;
+  FServiceBusy := FService.Busy;
+  ConnectionEnvironmentCombo.ItemIndex := Ord(FService.Environment);
+  ConnectionEnvironmentCombo.Enabled := FService.CanChangeEnvironment;
+  EnvironmentCombo.Enabled := FService.CanChangeEnvironment;
+  ConnectionIdentity.Caption := 'TRAFFIQX-ID: ' + FService.TraffiqxID;
+  ConnectionStatus.Font.Color := clRed;
+  ConnectionLamp.Brush.Color := clRed;
+  if FService.LoginUnconfirmed then
+  begin
+    ConnectionStatus.Font.Color := clOlive;
+    ConnectionLamp.Brush.Color := clYellow;
+    ConnectionStatus.Caption := 'Anmeldung abgebrochen – Verbindung bei DATEV prüfen';
+  end
+  else if FService.RevocationPending then
+  begin
+    ConnectionStatus.Font.Color := clOlive;
+    ConnectionLamp.Brush.Color := clYellow;
+    ConnectionStatus.Caption := 'Widerruf ausstehend – Tokens für Nutzung gesperrt';
+  end
+  else if FService.StorageBlocked then
+    ConnectionStatus.Caption := 'Nicht verbunden – Token-Ablage gesperrt (siehe Protokoll)'
+  else if FService.Connecting then
+    ConnectionStatus.Caption := 'Anmeldung läuft – bitte im Browser abschließen'
+  else if FService.Connected then
+  begin
+    ConnectionStatus.Font.Color := clGreen;
+    ConnectionLamp.Brush.Color := clLime;
+    ConnectionStatus.Caption := 'Verbunden (Inbox und Outbox geprüft)';
+  end
+  else if FService.HasTokens and (FService.RefreshExpiresAt > Now) then
+    ConnectionStatus.Caption := 'Nicht geprüft – bitte „Verbindung prüfen“ wählen'
   else
-    CanClose := False;
+    ConnectionStatus.Caption := 'Nicht verbunden – bitte neu verbinden';
+  ConnectionExpiry.Caption := 'Refresh-Token gültig bis: –';
+  if FService.RefreshExpiresAt > 0 then
+    ConnectionExpiry.Caption := 'Refresh-Token gültig bis: ' +
+      FormatDateTime('dd.mm.yyyy hh:nn', FService.RefreshExpiresAt);
+  ConnectionUser.Caption := 'Person: ' + FService.UserName;
+  if FService.UserName = '' then
+    ConnectionUser.Caption := 'Person: noch nicht verfügbar';
+  ConnectButton.Enabled := not (FService.Busy or FService.Connecting or FService.StorageBlocked);
+  CancelConnectButton.Visible := FService.Connecting;
+  CancelConnectButton.Enabled := FService.Connecting and not FService.Busy;
+  CheckConnectionButton.Enabled := FService.HasTokens and not
+    (FService.Busy or FService.Connecting or FService.StorageBlocked or
+     FService.RevocationPending or FService.LoginUnconfirmed);
+  DisconnectButton.Enabled := (FService.HasTokens or FService.RevocationPending or
+    FService.LoginUnconfirmed) and not
+    (FService.Busy or FService.Connecting or FService.StorageBlocked);
+  ConnectionHelpLink.Visible := FService.HelpUrl <> '';
+  ProtocolHelpLink.Visible := FService.HelpUrl <> '';
+  // Die URL bleibt Datenwert, kein ungeprüftes Markup im TLinkLabel.
+  ConnectionHelpLink.Hint := FService.HelpUrl;
+  ProtocolHelpLink.Hint := FService.HelpUrl;
+end;
+
+function TMiniAppMainForm.ConfirmLoginUnconfirmed: Boolean;
+var
+  LDialog: TTaskDialog;
+  LCursor: TCursor;
+begin
+  Result := False;
+  LCursor := Screen.Cursor;
+  Screen.Cursor := crDefault;
+  LDialog := TTaskDialog.Create(Self);
+  try
+    LDialog.Caption := 'DATEV-Verbindung prüfen';
+    LDialog.Title := 'Ungeklärte Anmeldung';
+    LDialog.Text := 'Eine abgebrochene Anmeldung kann bei DATEV eine Verbindung angelegt haben. ' +
+      'Bitte unter „Verbundene Anwendungen“ (https://apps.datev.de/tokrevui) prüfen und ' +
+      'eine nicht benötigte Verbindung entfernen. Fortfahren?';
+    LDialog.CommonButtons := [tcbYes, tcbNo];
+    LDialog.DefaultButton := tcbNo;
+    with LDialog.Buttons.Add do
+    begin
+      Caption := 'Verbundene Anwendungen öffnen';
+      ModalResult := mrRetry;
+    end;
+    repeat
+      if not LDialog.Execute then
+        Exit;
+      if LDialog.ModalResult = mrRetry then
+        ConnectionLinkClick(ConnectedAppsLink, '', sltURL);
+    until LDialog.ModalResult <> mrRetry;
+    Result := LDialog.ModalResult = mrYes;
+  finally
+    LDialog.Free;
+    Screen.Cursor := LCursor;
   end;
+end;
+
+procedure TMiniAppMainForm.ConnectClick(Sender: TObject);
+begin
+  // Umgebung vor der Anmeldung dauerhaft sichern, damit der Neustart dieselbe nutzt.
+  if (FService <> nil) and SaveData then
+    FService.Connect;
+end;
+
+procedure TMiniAppMainForm.CancelConnectClick(Sender: TObject);
+begin
+  if FService <> nil then
+    FService.CancelConnect;
+end;
+
+procedure TMiniAppMainForm.CheckConnectionClick(Sender: TObject);
+begin
+  if FService <> nil then
+    FService.CheckConnection;
+end;
+
+procedure TMiniAppMainForm.DisconnectClick(Sender: TObject);
+begin
+  if FService <> nil then
+    FService.Disconnect;
+end;
+
+procedure TMiniAppMainForm.ConnectionLinkClick(Sender: TObject; const Link: string;
+  LinkType: TSysLinkType);
+var
+  LUrl: string;
+begin
+  if Sender = ConnectedAppsLink then
+    LUrl := 'https://apps.datev.de/tokrevui'
+  else if FService <> nil then
+    LUrl := FService.HelpUrl
+  else
+    Exit;
+  if LUrl = '' then
+    Exit;
+  if NativeInt(ShellExecute(Handle, 'open', PChar(LUrl), nil, nil, SW_SHOWNORMAL)) <= 32 then
+    Log('Hilfeseite konnte nicht im Browser geöffnet werden: ' + LUrl, lkWarning);
+end;
+
+procedure TMiniAppMainForm.ConnectionTimerTick(Sender: TObject);
+begin
+  // Nur Anzeigeablauf; kein Netzwerk-Polling im Leerlauf.
+  UpdateConnection;
 end;
 
 end.

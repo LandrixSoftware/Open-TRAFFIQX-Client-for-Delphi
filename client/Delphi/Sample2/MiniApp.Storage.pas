@@ -47,6 +47,24 @@ type
     DeliveryChannel: string;
   end;
 
+  TMiniAppTokens = record
+    AccessToken: string;
+    RefreshToken: string;
+    AccessExpiresAt: TDateTime;
+    RefreshExpiresAt: TDateTime;
+    RevocationPending: Boolean;
+    LoginUnconfirmed: Boolean;
+    LoginUnconfirmedAt: TDateTime;
+    UserName: string;
+    Environment: TMiniAppEnvironment;
+    ClientID: string;
+    TraffiqxID: string;
+  end;
+
+// False: vorhandene Ablage unlesbar; niemals automatisch überschreiben.
+function LoadTokens(out ATokens: TMiniAppTokens): Boolean;
+procedure SaveTokens(const ATokens: TMiniAppTokens);
+
 function DataDirectory: string;
 function OutgoingDirectory: string;
 function IncomingDirectory: string;
@@ -71,7 +89,7 @@ implementation
 
 uses
   Winapi.Windows, System.Classes, System.IOUtils, System.JSON,
-  intf.Invoice, MiniApp.InvoiceBuilder;
+  intf.Invoice, MiniApp.InvoiceBuilder, intf.TRAFFIQXTokenProtection;
 
 function DataDirectory: string;
 begin
@@ -311,6 +329,125 @@ begin
   if not (LValue is TJSONString) then
     raise EConvertError.CreateFmt('Textfeld "%s" fehlt oder ist ungültig.', [AKey]);
   Result := LValue.Value;
+end;
+
+function LoadTokens(out ATokens: TMiniAppTokens): Boolean;
+var
+  LJson: TJSONObject;
+  LTokens: TMiniAppTokens;
+  LValue: TJSONValue;
+  LEnvironment: string;
+  LAttributes, LFileError: DWORD;
+
+  function ReadProtected(const AKey: string): string;
+  var
+    LText: string;
+  begin
+    LText := ReadJsonText(LJson, AKey);
+    // Der Bibliothekshelfer akzeptiert Legacy-Klartext; diese neue Ablage nicht.
+    if (LText <> '') and not LText.StartsWith(TTraffiqxTokenProtection.TEXT_PREFIX) then
+      raise EConvertError.Create('Unverschlüsselte Token-Ablage.');
+    if not TTraffiqxTokenProtection.UnprotectFromText(LText, Result) then
+      raise EConvertError.Create('Token-Ablage nicht entschlüsselbar.');
+  end;
+
+  function ReadExpiry(const AKey: string): TDateTime;
+  var
+    LNumber: TJSONValue;
+    LDate: Double;
+  begin
+    LNumber := LJson.GetValue(AKey);
+    if not (LNumber is TJSONNumber) then
+      raise EConvertError.Create('Token-Ablauf fehlt.');
+    if not TryStrToFloat(LNumber.Value, LDate, TFormatSettings.Invariant) then
+      raise EConvertError.Create('Token-Ablauf ungültig.');
+    if not ((LDate >= 0) and (LDate <= 2958465)) then
+      raise EConvertError.Create('Token-Ablauf außerhalb des Datumsbereichs.');
+    Result := LDate;
+  end;
+begin
+  ATokens := Default(TMiniAppTokens);
+  Result := False;
+  try
+    // FileExists allein unterscheidet fehlend und Zugriff verweigert nicht.
+    LAttributes := GetFileAttributes(PChar(TokensPath));
+    if LAttributes = INVALID_FILE_ATTRIBUTES then
+    begin
+      LFileError := GetLastError;
+      Exit((LFileError = ERROR_FILE_NOT_FOUND) or (LFileError = ERROR_PATH_NOT_FOUND));
+    end;
+    LTokens := Default(TMiniAppTokens);
+    LJson := ReadJsonObject(TokensPath);
+    try
+      if ReadJsonText(LJson, 'format') <> 'MiniApp.Tokens.v1' then
+        raise EConvertError.Create('Unbekanntes Token-Format.');
+      LTokens.AccessToken := ReadProtected('access_token');
+      LTokens.RefreshToken := ReadProtected('refresh_token');
+      LTokens.AccessExpiresAt := ReadExpiry('access_expires_at');
+      LTokens.RefreshExpiresAt := ReadExpiry('refresh_expires_at');
+      LValue := LJson.GetValue('revocation_pending');
+      if not (LValue is TJSONBool) then
+        raise EConvertError.Create('Widerrufstatus fehlt.');
+      LTokens.RevocationPending := LValue.Value = 'true';
+      // Ältere v1-Ablagen haben noch keinen Anmeldemarker.
+      LValue := LJson.GetValue('login_unconfirmed');
+      if LValue <> nil then
+      begin
+        if not (LValue is TJSONBool) then
+          raise EConvertError.Create('Anmeldestatus ungültig.');
+        LTokens.LoginUnconfirmed := LValue.Value = 'true';
+        LTokens.LoginUnconfirmedAt := ReadExpiry('login_unconfirmed_at');
+        if LTokens.LoginUnconfirmed and (LTokens.LoginUnconfirmedAt = 0) then
+          raise EConvertError.Create('Zeitpunkt der ungeklärten Anmeldung fehlt.');
+      end;
+      LTokens.UserName := ReadJsonText(LJson, 'user_name');
+      LTokens.ClientID := ReadJsonText(LJson, 'client_id');
+      LTokens.TraffiqxID := ReadJsonText(LJson, 'traffiqx_id');
+      LEnvironment := ReadJsonText(LJson, 'environment');
+      if LEnvironment = 'sandbox' then
+        LTokens.Environment := meSandbox
+      else if LEnvironment = 'production' then
+        LTokens.Environment := meProduction
+      else
+        raise EConvertError.Create('Unbekannte Token-Umgebung.');
+      ATokens := LTokens;
+      Result := True;
+    finally
+      LJson.Free;
+    end;
+  except
+    // Keine Dateiinhalte oder Konvertierungsfehler mit Tokens weiterreichen.
+    ATokens := Default(TMiniAppTokens);
+  end;
+end;
+
+procedure SaveTokens(const ATokens: TMiniAppTokens);
+var
+  LJson: TJSONObject;
+begin
+  LJson := TJSONObject.Create;
+  try
+    LJson.AddPair('format', 'MiniApp.Tokens.v1');
+    LJson.AddPair('access_token', TTraffiqxTokenProtection.ProtectToText(
+      ATokens.AccessToken, tpsCurrentUser));
+    LJson.AddPair('refresh_token', TTraffiqxTokenProtection.ProtectToText(
+      ATokens.RefreshToken, tpsCurrentUser));
+    LJson.AddPair('access_expires_at', TJSONNumber.Create(Double(ATokens.AccessExpiresAt)));
+    LJson.AddPair('refresh_expires_at', TJSONNumber.Create(Double(ATokens.RefreshExpiresAt)));
+    LJson.AddPair('revocation_pending', TJSONBool.Create(ATokens.RevocationPending));
+    LJson.AddPair('login_unconfirmed', TJSONBool.Create(ATokens.LoginUnconfirmed));
+    LJson.AddPair('login_unconfirmed_at', TJSONNumber.Create(Double(ATokens.LoginUnconfirmedAt)));
+    LJson.AddPair('user_name', ATokens.UserName);
+    LJson.AddPair('client_id', ATokens.ClientID);
+    LJson.AddPair('traffiqx_id', ATokens.TraffiqxID);
+    if ATokens.Environment = meSandbox then
+      LJson.AddPair('environment', 'sandbox')
+    else
+      LJson.AddPair('environment', 'production');
+    AtomicWriteText(TokensPath, LJson.ToJSON);
+  finally
+    LJson.Free;
+  end;
 end;
 
 function LoadInvoiceInfo(const AInvoiceNumber: string): TMiniAppInvoiceInfo;
