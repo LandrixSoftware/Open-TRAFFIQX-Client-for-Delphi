@@ -377,6 +377,13 @@ type
   TTraffiqxOutboxProgress = reference to procedure(
     const AStatus: TTraffiqxInboxDocumentStatusInfo; AElapsedMs: Cardinal);
 
+  // Ergebnis von PrepareSandboxXml, damit der Aufrufer selbst protokolliert.
+  TTraffiqxSandboxPreparation = record
+    ProfileIdSet: Boolean;          // BT-23 auf das Szenario gesetzt
+    ProfileIdMissing: Boolean;      // kein cbc:ProfileID im XML gefunden
+    BuyerReferenceCleared: Boolean; // BT-10-Platzhalter 'non-existent' geleert
+  end;
+
   TTRAFFIQXInvoiceAPI = class;
 
   TTraffiqxPollCompletedEvent = reference to procedure(const AResult: TTraffiqxPollResult; _Sender : TTRAFFIQXInvoiceAPI);
@@ -579,6 +586,19 @@ type
       const AInitialIntervalMs: Cardinal = 8000; const AMaxIntervalMs: Cardinal = 8000;
       const ATimeoutMs: Cardinal = 60000;
       const AProgress: TTraffiqxOutboxProgress = nil): Boolean;
+
+    // Nur fuer die Sandbox (UBL/XRechnung): setzt BT-23 (cbc:ProfileID) auf
+    // das Simulationsszenario, z. B. 'SBSZ:110' (TRAFFIQX/ZUGFeRD EN16931)
+    // oder 'SBSZ:210' (Peppol/XRechnung); ohne Marker bricht die Sandbox mit
+    // PROCESS_CANCELED ab. Leert ausserdem den BT-10-Platzhalter
+    // 'non-existent', den die Sandbox als Empfaenger-ID liest
+    // (CANCELED_BY_SYSTEM). In der Produktion NICHT aufrufen: ein leeres BT-10
+    // lehnt DATEV mit DRAFT_NON_COMPLIANT ab. ZUGFeRD-PDFs lassen sich so
+    // nicht umstellen, dort muss der Marker schon beim Erzeugen gesetzt sein.
+    // Liefert nil, wenn nichts zu aendern war; sonst gehoert der Stream dem
+    // Aufrufer. ASource bleibt unveraendert.
+    class function PrepareSandboxXml(ASource: TStream; const AScenario: string;
+      out AInfo: TTraffiqxSandboxPreparation): TMemoryStream; static;
 
     function DownloadOutboxDocument(const ADocumentId: string;
       out AContent: TMemoryStream; out APendingStatus: TTraffiqxInboxDocumentStatusInfo; out AError: TTraffiqxError): Boolean;
@@ -4676,6 +4696,53 @@ begin
   finally
     LObj.Free;
   end;
+end;
+
+class function TTRAFFIQXInvoiceAPI.PrepareSandboxXml(ASource: TStream;
+  const AScenario: string; out AInfo: TTraffiqxSandboxPreparation): TMemoryStream;
+const
+  PROFILE_OPEN = '<cbc:ProfileID>';
+  PROFILE_CLOSE = '</cbc:ProfileID>';
+  BT10_PLACEHOLDER = '<cbc:BuyerReference>non-existent</cbc:BuyerReference>';
+  BT10_EMPTY = '<cbc:BuyerReference></cbc:BuyerReference>';
+var
+  LBytes: TBytes;
+  LXml: string;
+  i, j: Integer;
+begin
+  Result := nil;
+  AInfo := Default(TTraffiqxSandboxPreparation);
+  if (ASource = nil) or (AScenario = '') then
+    Exit;
+  ASource.Position := 0;
+  SetLength(LBytes, ASource.Size);
+  if Length(LBytes) > 0 then
+    ASource.ReadBuffer(LBytes[0], Length(LBytes));
+  LXml := TEncoding.UTF8.GetString(LBytes);
+
+  i := Pos(PROFILE_OPEN, LXml);
+  j := Pos(PROFILE_CLOSE, LXml);
+  if (i > 0) and (j > i) then
+  begin
+    LXml := Copy(LXml, 1, i + Length(PROFILE_OPEN) - 1) + AScenario + Copy(LXml, j, MaxInt);
+    AInfo.ProfileIdSet := True;
+  end
+  else
+    AInfo.ProfileIdMissing := True;
+
+  if Pos(BT10_PLACEHOLDER, LXml) > 0 then
+  begin
+    LXml := StringReplace(LXml, BT10_PLACEHOLDER, BT10_EMPTY, []);
+    AInfo.BuyerReferenceCleared := True;
+  end;
+
+  if not (AInfo.ProfileIdSet or AInfo.BuyerReferenceCleared) then
+    Exit;
+  LBytes := TEncoding.UTF8.GetBytes(LXml);
+  Result := TMemoryStream.Create;
+  if Length(LBytes) > 0 then
+    Result.WriteBuffer(LBytes[0], Length(LBytes));
+  Result.Position := 0;
 end;
 
 end.
