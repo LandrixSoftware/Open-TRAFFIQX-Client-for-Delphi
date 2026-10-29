@@ -371,6 +371,13 @@ const
 // Ziffernfolge (13 bis 15 Zeichen, z.B. 0042000711688).
 function TraffiqxNormalizeId(const AValue: string): string;
 
+// Soll/Ist-Pruefung des Versandkanals (MUST nach "sent"): passt der
+// tatsaechliche delivery_channel.name aus GetOutboxDocumentMetadata zum
+// gewollten Kanal 'email', 'traffiqx', 'peppol' oder 'leitwegid'? Eine
+// Leitweg-ID darf ueber TRAFFIQX oder Peppol zugestellt werden. Leerer oder
+// unbekannter Sollkanal: True (keine Pruefung moeglich).
+function TraffiqxChannelMatches(const AIntended, AActualName: string): Boolean;
+
 type
   // Nur waehrend des synchronen Aufrufs gueltig: Status weder aendern noch
   // freigeben/aufbewahren. Das abschliessende AStatus gehoert dem Aufrufer.
@@ -907,6 +914,23 @@ end;
 function TTraffiqxPollRun.ShouldClearSession: Boolean;
 begin
   Result := TInterlocked.CompareExchange(FClearSession, 0, 0) <> 0;
+end;
+
+function TraffiqxChannelMatches(const AIntended, AActualName: string): Boolean;
+var
+  LNorm: string;
+begin
+  LNorm := LowerCase(StringReplace(AActualName, '-', '', [rfReplaceAll]));
+  if SameText(AIntended, 'email') then
+    Result := LNorm.Contains('mail')
+  else if SameText(AIntended, 'traffiqx') then
+    Result := LNorm.Contains('traffiqx')
+  else if SameText(AIntended, 'peppol') then
+    Result := LNorm.Contains('peppol')
+  else if SameText(AIntended, 'leitwegid') then
+    Result := LNorm.Contains('traffiqx') or LNorm.Contains('peppol')
+  else
+    Result := True;
 end;
 
 function TraffiqxNormalizeId(const AValue: string): string;
