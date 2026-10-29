@@ -664,7 +664,12 @@ begin
     LDetail := AJson.ToJSON;
 
   Result := TTraffiqxError.Create(LTitle, LStatus, LDetail);
-  AJson.TryGetValue<string>('type', Result.TypeUri);
+  try
+    AJson.TryGetValue<string>('type', Result.TypeUri);
+  except
+    Result.Free;
+    raise;
+  end;
 end;
 
 function TTraffiqxError.ToJson: TJSONObject;
@@ -1204,10 +1209,15 @@ begin
   if AJson = nil then
     Exit;
   Result := TTraffiqxInboxDocumentStatusInfo.Create;
-  AJson.TryGetValue<string>('status', Result.Status);
-  AJson.TryGetValue<string>('error_code', Result.ErrorCode);
-  AJson.TryGetValue<string>('error_details', Result.ErrorDetails);
-  AJson.TryGetValue<Boolean>('downloaded', Result.Downloaded);
+  try
+    AJson.TryGetValue<string>('status', Result.Status);
+    AJson.TryGetValue<string>('error_code', Result.ErrorCode);
+    AJson.TryGetValue<string>('error_details', Result.ErrorDetails);
+    AJson.TryGetValue<Boolean>('downloaded', Result.Downloaded);
+  except
+    Result.Free;
+    raise;
+  end;
 end;
 
 function TTraffiqxInboxDocumentStatusInfo.ParsedStatus: TTraffiqxDocumentStatus;
@@ -3204,6 +3214,7 @@ var
   Response: IHTTPResponse;
   lUrl: string;
   lJSONValue: TJSONValue;
+  LResponseText: string;
 begin
   AContent := nil;
   AError := nil;
@@ -3257,22 +3268,20 @@ begin
 
       if Response.StatusCode <> 200 then
       begin
-        AContent.Clear;
-        AContent.Size := 0;
-        if ContainsText(Response.HeaderValue['Content-Type'], 'application/problem+json') then
+        // Die Response liest AContent: vor der Freigabe ab Position 0 sichern.
+        AContent.Position := 0;
+        LResponseText := Response.ContentAsString(TEncoding.UTF8);
+        FreeAndNil(AContent);
+        lJSONValue := TJSONObject.ParseJSONValue(LResponseText);
+        if lJSONValue is TJSONObject then
         begin
-          lJSONValue := TJSONObject.ParseJSONValue(Response.ContentAsString(TEncoding.UTF8));
-          if lJSONValue is TJSONObject then
-            AError := TTraffiqxError.FromJson(TJSONObject(lJSONValue));
+          AError := TTraffiqxError.FromJson(TJSONObject(lJSONValue));
+          if AError.Status = 0 then
+            AError.Status := Response.StatusCode;
         end
         else
           AError := MakeError('#HTTP' + Response.StatusCode.ToString,
-            Response.StatusCode, Response.ContentAsString(TEncoding.UTF8));
-
-        if AError = nil then
-          AError := MakeError('#HTTP' + Response.StatusCode.ToString,
-            Response.StatusCode, Response.ContentAsString(TEncoding.UTF8));
-        FreeAndNil(AContent);
+            Response.StatusCode, LResponseText);
         Exit;
       end;
 
@@ -3282,7 +3291,12 @@ begin
       on E: Exception do
       begin
         FreeAndNil(AContent);
-        AError := MakeError('#STREAM', 0, E.Message);
+        FreeAndNil(AError);
+        // HTTP-Status behalten, wenn schon eine Antwort da ist
+        if Assigned(Response) then
+          AError := MakeError('#STREAM', Response.StatusCode, E.Message)
+        else
+          AError := MakeError('#STREAM', 0, E.Message);
       end;
     end;
   finally
@@ -3853,6 +3867,7 @@ var
   Response: IHTTPResponse;
   lUrl: string;
   lJSONValue: TJSONValue;
+  LResponseText: string;
 begin
   Result := False; AContent := nil; APendingStatus := nil; AError := nil;
   if (FApiBaseUri = '') or (FTRAFFIQXId = '') or (FAccessToken = '') or (FClientId = '') then
@@ -3886,26 +3901,45 @@ begin
       Exit;
     end;
 
-    // 202: Status zurückliefern, kein Download
-    if Response.StatusCode = 202 then
-    begin
-      AContent.Free; AContent := nil;
-      lJSONValue := TJSONObject.ParseJSONValue(Response.ContentAsString(TEncoding.UTF8));
-      if lJSONValue is TJSONObject then
-        APendingStatus := TTraffiqxInboxDocumentStatusInfo.FromJson(TJSONObject(lJSONValue))
-      else
-        AError := MakeError('#PARSE', 0, 'Antwort enthält kein JSON-Objekt.');
-      Exit;
-    end;
+    // Lesen und Parsen duerfen den Aufrufer nicht verlassen (wie beim Inbox-Download).
+    try
+      // Die Response liest AContent: vor der Freigabe ab Position 0 sichern.
+      AContent.Position := 0;
+      LResponseText := Response.ContentAsString(TEncoding.UTF8);
+      FreeAndNil(AContent);
 
-    // Fehlerfall
-    AContent.Free; AContent := nil;
-    lJSONValue := TJSONObject.ParseJSONValue(Response.ContentAsString(TEncoding.UTF8));
-    if lJSONValue is TJSONObject then
-      AError := TTraffiqxError.FromJson(TJSONObject(lJSONValue))
-    else
-      AError := MakeError('#HTTP' + Response.StatusCode.ToString, Response.StatusCode, Response.ContentAsString(TEncoding.UTF8));
+      // 202: Status zurückliefern, kein Download
+      if Response.StatusCode = 202 then
+      begin
+        lJSONValue := TJSONObject.ParseJSONValue(LResponseText);
+        if lJSONValue is TJSONObject then
+          APendingStatus := TTraffiqxInboxDocumentStatusInfo.FromJson(TJSONObject(lJSONValue))
+        else
+          AError := MakeError('#PARSE', 0, 'Antwort enthält kein JSON-Objekt.');
+        Exit;
+      end;
+
+      // Fehlerfall
+      lJSONValue := TJSONObject.ParseJSONValue(LResponseText);
+      if lJSONValue is TJSONObject then
+      begin
+        AError := TTraffiqxError.FromJson(TJSONObject(lJSONValue));
+        if AError.Status = 0 then
+          AError.Status := Response.StatusCode;
+      end
+      else
+        AError := MakeError('#HTTP' + Response.StatusCode.ToString, Response.StatusCode, LResponseText);
+    except
+      on E: Exception do
+      begin
+        FreeAndNil(APendingStatus);
+        FreeAndNil(AError);
+        AError := MakeError('#STREAM', Response.StatusCode, E.Message);
+      end;
+    end;
   finally
+    if not Result then
+      FreeAndNil(AContent);
     lJSONValue.Free;
     HttpClient.Free;
   end;
