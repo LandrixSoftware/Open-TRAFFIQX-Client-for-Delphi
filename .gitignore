@@ -55,6 +55,12 @@ Win64/
 *.identcache
 *.stat
 
+# Sample 2: lokale Stammdaten und erzeugte Projektressourcen
+client/Delphi/Sample2/**/Daten/
+client/Delphi/Sample2/TIAMiniApp.res
+client/Delphi/Sample2/TIAMiniApp.vrc
+client/Delphi/Sample2/TIAMiniApp.$manifest
+
 # Logs, Schluessel, Zertifikate
 *.log
 *.pem

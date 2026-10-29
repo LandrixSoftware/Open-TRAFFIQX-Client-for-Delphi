@@ -1,0 +1,772 @@
+﻿{
+License Open-TRAFFIQX-Client-for-Delphi
+
+Copyright (C) 2026 Landrix Software GmbH & Co. KG
+Sven Harazim, info@landrix.de
+Version 0.1
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+}
+
+unit MiniApp.MainForm;
+
+interface
+
+uses
+  System.SysUtils, System.Classes, Vcl.Controls, Vcl.Forms, Vcl.StdCtrls,
+  Vcl.ExtCtrls, Vcl.ComCtrls, Vcl.Mask, MiniApp.Model, MiniApp.Storage;
+
+type
+  TMiniAppLogKind = (lkInfo, lkWarning, lkError);
+
+  TMiniAppMainForm = class(TForm)
+    Pages: TPageControl;
+    ConnectionTab: TTabSheet;
+    ConnectionHint: TLabel;
+    MasterDataTab: TTabSheet;
+    SavePanel: TPanel;
+    SaveButton: TButton;
+    SaveState: TLabel;
+    MasterPages: TPageControl;
+    SellerTab: TTabSheet;
+    SellerScroll: TScrollBox;
+    SettingsPanel: TPanel;
+    ExampleHint: TLabel;
+    EnvironmentLabel: TLabel;
+    EnvironmentCombo: TComboBox;
+    InvoiceNumberLabel: TLabel;
+    SellerGrid: TGridPanel;
+    SellerNamePanel: TPanel;
+    SellerName: TLabeledEdit;
+    SellerStreetPanel: TPanel;
+    SellerStreet: TLabeledEdit;
+    SellerPostalCodePanel: TPanel;
+    SellerPostalCode: TLabeledEdit;
+    SellerCityPanel: TPanel;
+    SellerCity: TLabeledEdit;
+    SellerCountryCodePanel: TPanel;
+    SellerCountryCode: TLabeledEdit;
+    SellerVatIDPanel: TPanel;
+    SellerVatID: TLabeledEdit;
+    SellerTaxNumberPanel: TPanel;
+    SellerTaxNumber: TLabeledEdit;
+    SellerContactNamePanel: TPanel;
+    SellerContactName: TLabeledEdit;
+    SellerPhonePanel: TPanel;
+    SellerPhone: TLabeledEdit;
+    SellerEmailPanel: TPanel;
+    SellerEmail: TLabeledEdit;
+    SellerElectronicAddressPanel: TPanel;
+    SellerElectronicAddress: TLabeledEdit;
+    SellerIBANPanel: TPanel;
+    SellerIBAN: TLabeledEdit;
+    SellerBICPanel: TPanel;
+    SellerBIC: TLabeledEdit;
+    SellerBankNamePanel: TPanel;
+    SellerBankName: TLabeledEdit;
+    CustomerTab: TTabSheet;
+    CustomerScroll: TScrollBox;
+    CustomerEditor: TPanel;
+    CustomerButtons: TPanel;
+    CustomerNewButton: TButton;
+    CustomerDeleteButton: TButton;
+    CustomerApplyButton: TButton;
+    CustomerGrid: TGridPanel;
+    CustomerCustomerNumberPanel: TPanel;
+    CustomerCustomerNumber: TLabeledEdit;
+    CustomerNamePanel: TPanel;
+    CustomerName: TLabeledEdit;
+    CustomerStreetPanel: TPanel;
+    CustomerStreet: TLabeledEdit;
+    CustomerPostalCodePanel: TPanel;
+    CustomerPostalCode: TLabeledEdit;
+    CustomerCityPanel: TPanel;
+    CustomerCity: TLabeledEdit;
+    CustomerCountryCodePanel: TPanel;
+    CustomerCountryCode: TLabeledEdit;
+    CustomerVatIDPanel: TPanel;
+    CustomerVatID: TLabeledEdit;
+    CustomerDeliveryChannelPanel: TPanel;
+    DeliveryChannelLabel: TLabel;
+    CustomerDeliveryChannel: TComboBox;
+    CustomerBuyerReferencePanel: TPanel;
+    CustomerBuyerReference: TLabeledEdit;
+    CustomerElectronicAddressPanel: TPanel;
+    CustomerElectronicAddress: TLabeledEdit;
+    CustomerElectronicAddressSchemePanel: TPanel;
+    CustomerElectronicAddressScheme: TLabeledEdit;
+    CustomerContactEmailPanel: TPanel;
+    CustomerContactEmail: TLabeledEdit;
+    CustomerTraffiqxIDPanel: TPanel;
+    CustomerTraffiqxID: TLabeledEdit;
+    CustomerList: TListView;
+    PositionTab: TTabSheet;
+    PositionScroll: TScrollBox;
+    PositionEditor: TPanel;
+    PositionButtons: TPanel;
+    PositionNewButton: TButton;
+    PositionDeleteButton: TButton;
+    PositionApplyButton: TButton;
+    PositionGrid: TGridPanel;
+    PositionDescriptionPanel: TPanel;
+    PositionDescription: TLabeledEdit;
+    PositionQuantityPanel: TPanel;
+    PositionQuantity: TLabeledEdit;
+    PositionUnitCodePanel: TPanel;
+    PositionUnitCode: TLabeledEdit;
+    PositionNetUnitPricePanel: TPanel;
+    PositionNetUnitPrice: TLabeledEdit;
+    PositionVatRatePanel: TPanel;
+    PositionVatRate: TLabeledEdit;
+    PositionList: TListView;
+    OutgoingTab: TTabSheet;
+    OutgoingHint: TLabel;
+    IncomingTab: TTabSheet;
+    IncomingHint: TLabel;
+    ProtocolTab: TTabSheet;
+    ProtocolHint: TLabel;
+    ProtocolMemo: TMemo;
+    procedure FormCreate(Sender: TObject);
+    procedure FormCloseQuery(Sender: TObject; var CanClose: Boolean);
+    procedure SellerChanged(Sender: TObject);
+    procedure CustomerChanged(Sender: TObject);
+    procedure PositionChanged(Sender: TObject);
+    procedure EnvironmentChanged(Sender: TObject);
+    procedure SaveClick(Sender: TObject);
+    procedure CustomerSelected(Sender: TObject; Item: TListItem; Selected: Boolean);
+    procedure PositionSelected(Sender: TObject; Item: TListItem; Selected: Boolean);
+    procedure CustomerNewClick(Sender: TObject);
+    procedure CustomerDeleteClick(Sender: TObject);
+    procedure CustomerApplyClick(Sender: TObject);
+    procedure PositionNewClick(Sender: TObject);
+    procedure PositionDeleteClick(Sender: TObject);
+    procedure PositionApplyClick(Sender: TObject);
+  private
+    FData: TMiniAppData;
+    FClientConfig: TMiniAppClientConfig;
+    FUpdating: Boolean;
+    FDirty: Boolean;
+    FCustomerDirty: Boolean;
+    FPositionDirty: Boolean;
+    FCustomerIndex: Integer;
+    FPositionIndex: Integer;
+    procedure MarkDirty;
+    procedure ReadSeller;
+    procedure ShowSeller;
+    procedure ShowCustomer;
+    procedure ShowPosition;
+    procedure RefreshCustomers;
+    procedure RefreshPositions;
+    procedure ApplyCustomer;
+    procedure ApplyPosition;
+    function ConfirmCustomerChange: Boolean;
+    function ConfirmPositionChange: Boolean;
+    function SaveData: Boolean;
+  public
+    destructor Destroy; override;
+    // S1: Aufruf im Hauptthread; später Service-Callbacks per TThread.Queue.
+    procedure Log(const AText: string; AKind: TMiniAppLogKind = lkInfo);
+  end;
+
+var
+  MiniAppMainForm: TMiniAppMainForm;
+
+implementation
+
+uses
+  Vcl.Dialogs, System.UITypes;
+
+{$R *.dfm}
+
+procedure TMiniAppMainForm.FormCreate(Sender: TObject);
+begin
+  FUpdating := True;
+  FCustomerIndex := -1;
+  FPositionIndex := -1;
+  EnsureDataDirectories;
+  FData := TMiniAppData.Create;
+  // Lesefehler sind fatal: vorhandene Daten niemals durch Beispiele ersetzen.
+  // Die VCL wuerde eine Exception aus OnCreate nur anzeigen und das halb
+  // geladene Fenster trotzdem oeffnen; deshalb hier melden und beenden.
+  try
+    FData.LoadFromFile(MasterDataPath);
+  except
+    on E: Exception do
+    begin
+      MessageDlg('Die Stammdaten konnten nicht gelesen werden:' + sLineBreak + MasterDataPath
+        + sLineBreak + sLineBreak + E.Message + sLineBreak + sLineBreak
+        + 'Die Datei bleibt unverändert. Das Programm wird beendet.', mtError, [mbOK], 0);
+      Application.ShowMainForm := False;
+      Application.Terminate;
+      Exit;
+    end;
+  end;
+  ShowSeller;
+  RefreshCustomers;
+  RefreshPositions;
+  FCustomerIndex := 0;
+  if FData.Customers.Count = 0 then
+    FCustomerIndex := -1;
+  FPositionIndex := 0;
+  if FData.Positions.Count = 0 then
+    FPositionIndex := -1;
+  ShowCustomer;
+  ShowPosition;
+  FUpdating := False;
+  FDirty := False;
+  SaveState.Caption := 'Gespeichert: ' + MasterDataPath;
+  SaveState.Hint := SaveState.Caption;
+  Log('Stammdaten geladen. Ablage: ' + DataDirectory);
+  try
+    FClientConfig := LoadClientConfig;
+    if FClientConfig.SourceFile = '' then
+      Log('Keine .env gefunden. Stammdaten können ohne Client-Konfiguration bearbeitet werden.', lkWarning)
+    else
+      Log('Client-Konfiguration geladen; Verbindung folgt in Scheibe S3.');
+  except
+    // Niemals Konfigurationswerte oder Zugangsdaten in das Protokoll übernehmen.
+    Log('Client-Konfiguration konnte nicht gelesen werden. Bitte .env prüfen.', lkWarning);
+  end;
+end;
+
+destructor TMiniAppMainForm.Destroy;
+begin
+  FUpdating := True;
+  FreeAndNil(FData);
+  inherited;
+end;
+
+procedure TMiniAppMainForm.Log(const AText: string; AKind: TMiniAppLogKind);
+const
+  KindNames: array[TMiniAppLogKind] of string = ('Info', 'Warnung', 'Fehler');
+begin
+  ProtocolMemo.Lines.Add(FormatDateTime('dd.mm.yyyy hh:nn:ss', Now) +
+    ' [' + KindNames[AKind] + '] ' + AText);
+end;
+
+procedure TMiniAppMainForm.MarkDirty;
+begin
+  FDirty := True;
+  SaveState.Caption := 'Ungespeicherte Änderungen';
+  SaveState.Hint := SaveState.Caption;
+end;
+
+procedure TMiniAppMainForm.SellerChanged(Sender: TObject);
+begin
+  if not FUpdating then
+    MarkDirty;
+end;
+
+procedure TMiniAppMainForm.CustomerChanged(Sender: TObject);
+begin
+  if not FUpdating then
+  begin
+    FCustomerDirty := True;
+    MarkDirty;
+  end;
+end;
+
+procedure TMiniAppMainForm.PositionChanged(Sender: TObject);
+begin
+  if not FUpdating then
+  begin
+    FPositionDirty := True;
+    MarkDirty;
+  end;
+end;
+
+procedure TMiniAppMainForm.EnvironmentChanged(Sender: TObject);
+begin
+  if FUpdating then
+    Exit;
+  if EnvironmentCombo.ItemIndex = Ord(meProduction) then
+    if MessageDlg('Produktion verarbeitet echte Rechnungen. Die Beispieldaten sind dafür ungeeignet. ' +
+      'Trotzdem auf Produktion umschalten?', mtWarning, [mbYes, mbNo], 0) <> mrYes then
+    begin
+      EnvironmentCombo.ItemIndex := Ord(meSandbox);
+      Exit;
+    end;
+  MarkDirty;
+end;
+
+procedure TMiniAppMainForm.ShowSeller;
+begin
+  SellerName.Text := FData.Seller.Name;
+  SellerStreet.Text := FData.Seller.Street;
+  SellerPostalCode.Text := FData.Seller.PostalCode;
+  SellerCity.Text := FData.Seller.City;
+  SellerCountryCode.Text := FData.Seller.CountryCode;
+  SellerVatID.Text := FData.Seller.VatID;
+  SellerTaxNumber.Text := FData.Seller.TaxNumber;
+  SellerContactName.Text := FData.Seller.ContactName;
+  SellerPhone.Text := FData.Seller.Phone;
+  SellerEmail.Text := FData.Seller.Email;
+  SellerElectronicAddress.Text := FData.Seller.ElectronicAddress;
+  SellerIBAN.Text := FData.Seller.IBAN;
+  SellerBIC.Text := FData.Seller.BIC;
+  SellerBankName.Text := FData.Seller.BankName;
+  EnvironmentCombo.ItemIndex := Ord(FData.Environment);
+  InvoiceNumberLabel.Caption := 'Nächste Rechnungsnummer: ' + FData.PendingInvoiceNumber;
+end;
+
+procedure TMiniAppMainForm.ReadSeller;
+begin
+  FData.Seller.Name := Trim(SellerName.Text);
+  FData.Seller.Street := Trim(SellerStreet.Text);
+  FData.Seller.PostalCode := Trim(SellerPostalCode.Text);
+  FData.Seller.City := Trim(SellerCity.Text);
+  FData.Seller.CountryCode := Trim(SellerCountryCode.Text);
+  FData.Seller.VatID := Trim(SellerVatID.Text);
+  FData.Seller.TaxNumber := Trim(SellerTaxNumber.Text);
+  FData.Seller.ContactName := Trim(SellerContactName.Text);
+  FData.Seller.Phone := Trim(SellerPhone.Text);
+  FData.Seller.Email := Trim(SellerEmail.Text);
+  FData.Seller.ElectronicAddress := Trim(SellerElectronicAddress.Text);
+  FData.Seller.IBAN := Trim(SellerIBAN.Text);
+  FData.Seller.BIC := Trim(SellerBIC.Text);
+  FData.Seller.BankName := Trim(SellerBankName.Text);
+  FData.Seller.CountryCode := UpperCase(FData.Seller.CountryCode);
+  FData.Environment := TMiniAppEnvironment(EnvironmentCombo.ItemIndex);
+end;
+
+procedure TMiniAppMainForm.ShowCustomer;
+var
+  LValue: TMiniAppCustomer;
+begin
+  LValue := Default(TMiniAppCustomer);
+  if FCustomerIndex >= 0 then
+    LValue := FData.Customers[FCustomerIndex]
+  else
+  begin
+    LValue.CountryCode := 'DE';
+    LValue.DeliveryChannel := 'email';
+    LValue.ElectronicAddressScheme := 'EM';
+  end;
+  CustomerCustomerNumber.Text := LValue.CustomerNumber;
+  CustomerName.Text := LValue.Name;
+  CustomerStreet.Text := LValue.Street;
+  CustomerPostalCode.Text := LValue.PostalCode;
+  CustomerCity.Text := LValue.City;
+  CustomerCountryCode.Text := LValue.CountryCode;
+  CustomerVatID.Text := LValue.VatID;
+  CustomerDeliveryChannel.ItemIndex := CustomerDeliveryChannel.Items.IndexOf(LValue.DeliveryChannel);
+  CustomerBuyerReference.Text := LValue.BuyerReference;
+  CustomerElectronicAddress.Text := LValue.ElectronicAddress;
+  CustomerElectronicAddressScheme.Text := LValue.ElectronicAddressScheme;
+  CustomerContactEmail.Text := LValue.ContactEmail;
+  CustomerTraffiqxID.Text := LValue.TraffiqxID;
+  if FCustomerIndex >= 0 then
+    CustomerList.Selected := CustomerList.Items[FCustomerIndex]
+  else
+    CustomerList.Selected := nil;
+  FCustomerDirty := False;
+end;
+
+procedure TMiniAppMainForm.RefreshCustomers;
+var
+  I: Integer;
+  LValue: TMiniAppCustomer;
+  LItem: TListItem;
+begin
+  // Bestehende Items erhalten: auch innerhalb von OnSelectItem aufrufbar.
+  CustomerList.Items.BeginUpdate;
+  try
+    while CustomerList.Items.Count > FData.Customers.Count do
+      CustomerList.Items.Delete(CustomerList.Items.Count - 1);
+    while CustomerList.Items.Count < FData.Customers.Count do
+      CustomerList.Items.Add;
+    for I := 0 to FData.Customers.Count - 1 do
+    begin
+      LValue := FData.Customers[I];
+      LItem := CustomerList.Items[I];
+      LItem.SubItems.Clear;
+      LItem.Caption := LValue.CustomerNumber;
+      LItem.SubItems.Add(LValue.Name);
+      LItem.SubItems.Add(LValue.DeliveryChannel);
+    end;
+  finally
+    CustomerList.Items.EndUpdate;
+  end;
+end;
+
+procedure TMiniAppMainForm.ApplyCustomer;
+var
+  LValue: TMiniAppCustomer;
+  I: Integer;
+begin
+  if not FCustomerDirty then
+    Exit;
+  LValue := Default(TMiniAppCustomer);
+  LValue.CustomerNumber := Trim(CustomerCustomerNumber.Text);
+  LValue.Name := Trim(CustomerName.Text);
+  LValue.Street := Trim(CustomerStreet.Text);
+  LValue.PostalCode := Trim(CustomerPostalCode.Text);
+  LValue.City := Trim(CustomerCity.Text);
+  LValue.CountryCode := Trim(CustomerCountryCode.Text);
+  LValue.VatID := Trim(CustomerVatID.Text);
+  LValue.DeliveryChannel := CustomerDeliveryChannel.Text;
+  LValue.BuyerReference := Trim(CustomerBuyerReference.Text);
+  LValue.ElectronicAddress := Trim(CustomerElectronicAddress.Text);
+  LValue.ElectronicAddressScheme := Trim(CustomerElectronicAddressScheme.Text);
+  LValue.ContactEmail := Trim(CustomerContactEmail.Text);
+  LValue.TraffiqxID := Trim(CustomerTraffiqxID.Text);
+  LValue.CountryCode := UpperCase(LValue.CountryCode);
+  for I := 0 to FData.Customers.Count - 1 do
+    if (I <> FCustomerIndex) and SameText(LValue.CustomerNumber, FData.Customers[I].CustomerNumber) then
+      raise EConvertError.Create('Diese Kundennummer ist bereits vergeben.');
+  ValidateCustomer(LValue);
+  if FCustomerIndex < 0 then
+    FCustomerIndex := FData.Customers.Add(LValue)
+  else
+    FData.Customers[FCustomerIndex] := LValue;
+  FCustomerDirty := False;
+  MarkDirty;
+end;
+
+function TMiniAppMainForm.ConfirmCustomerChange: Boolean;
+begin
+  Result := True;
+  if not FCustomerDirty then
+    Exit;
+  case MessageDlg('Änderungen im aktuellen Kundeneditor übernehmen?',
+    mtConfirmation, [mbYes, mbNo, mbCancel], 0) of
+    mrYes:
+      try
+        ApplyCustomer;
+      except
+        on E: Exception do
+        begin
+          MessageDlg(E.Message, mtError, [mbOK], 0);
+          Result := False;
+        end;
+      end;
+    mrNo: FCustomerDirty := False;
+  else
+    Result := False;
+  end;
+end;
+
+procedure TMiniAppMainForm.CustomerSelected(Sender: TObject; Item: TListItem; Selected: Boolean);
+var
+  LIndex: Integer;
+begin
+  if FUpdating or not Selected then
+    Exit;
+  LIndex := Item.Index;
+  if LIndex = FCustomerIndex then
+    Exit;
+  FUpdating := True;
+  try
+    if ConfirmCustomerChange then
+    begin
+      FCustomerIndex := LIndex;
+      RefreshCustomers;
+      ShowCustomer;
+    end
+    else if FCustomerIndex >= 0 then
+      CustomerList.Selected := CustomerList.Items[FCustomerIndex]
+    else
+      CustomerList.Selected := nil;
+  finally
+    FUpdating := False;
+  end;
+end;
+
+procedure TMiniAppMainForm.CustomerNewClick(Sender: TObject);
+begin
+  FUpdating := True;
+  try
+    if not ConfirmCustomerChange then
+      Exit;
+    RefreshCustomers;
+    FCustomerIndex := -1;
+    ShowCustomer;
+    CustomerCustomerNumber.SetFocus;
+  finally
+    FUpdating := False;
+  end;
+end;
+
+procedure TMiniAppMainForm.CustomerDeleteClick(Sender: TObject);
+begin
+  if (FCustomerIndex < 0) and not FCustomerDirty then
+    Exit;
+  if MessageDlg('Aktuellen Kunden löschen?', mtConfirmation,
+    [mbYes, mbNo], 0) <> mrYes then
+    Exit;
+  FUpdating := True;
+  try
+    if FCustomerIndex >= 0 then
+      FData.Customers.Delete(FCustomerIndex);
+    FCustomerIndex := -1;
+    RefreshCustomers;
+    ShowCustomer;
+    MarkDirty;
+  finally
+    FUpdating := False;
+  end;
+end;
+
+procedure TMiniAppMainForm.CustomerApplyClick(Sender: TObject);
+begin
+  FUpdating := True;
+  try
+    try
+      ApplyCustomer;
+      RefreshCustomers;
+      ShowCustomer;
+    except
+      on E: Exception do
+        MessageDlg(E.Message, mtError, [mbOK], 0);
+    end;
+  finally
+    FUpdating := False;
+  end;
+end;
+
+procedure TMiniAppMainForm.ShowPosition;
+var
+  LValue: TMiniAppPosition;
+begin
+  LValue := Default(TMiniAppPosition);
+  if FPositionIndex >= 0 then
+    LValue := FData.Positions[FPositionIndex]
+  else
+  begin
+    LValue.Quantity := 1;
+    LValue.UnitCode := 'H87';
+    LValue.VatRate := 19;
+  end;
+  PositionDescription.Text := LValue.Description;
+  PositionQuantity.Text := CurrToStr(LValue.Quantity);
+  PositionUnitCode.Text := LValue.UnitCode;
+  PositionNetUnitPrice.Text := CurrToStr(LValue.NetUnitPrice);
+  PositionVatRate.Text := CurrToStr(LValue.VatRate);
+  if FPositionIndex >= 0 then
+    PositionList.Selected := PositionList.Items[FPositionIndex]
+  else
+    PositionList.Selected := nil;
+  FPositionDirty := False;
+end;
+
+procedure TMiniAppMainForm.RefreshPositions;
+var
+  I: Integer;
+  LValue: TMiniAppPosition;
+  LItem: TListItem;
+begin
+  // Bestehende Items erhalten: auch innerhalb von OnSelectItem aufrufbar.
+  PositionList.Items.BeginUpdate;
+  try
+    while PositionList.Items.Count > FData.Positions.Count do
+      PositionList.Items.Delete(PositionList.Items.Count - 1);
+    while PositionList.Items.Count < FData.Positions.Count do
+      PositionList.Items.Add;
+    for I := 0 to FData.Positions.Count - 1 do
+    begin
+      LValue := FData.Positions[I];
+      LItem := PositionList.Items[I];
+      LItem.SubItems.Clear;
+      LItem.Caption := LValue.Description;
+      LItem.SubItems.Add(CurrToStr(LValue.Quantity));
+      LItem.SubItems.Add(LValue.UnitCode);
+      LItem.SubItems.Add(CurrToStr(LValue.NetUnitPrice));
+      LItem.SubItems.Add(CurrToStr(LValue.VatRate));
+    end;
+  finally
+    PositionList.Items.EndUpdate;
+  end;
+end;
+
+procedure TMiniAppMainForm.ApplyPosition;
+var
+  LValue: TMiniAppPosition;
+begin
+  if not FPositionDirty then
+    Exit;
+  LValue := Default(TMiniAppPosition);
+  LValue.Description := Trim(PositionDescription.Text);
+  if not TryStrToCurr(Trim(PositionQuantity.Text), LValue.Quantity) then
+    raise EConvertError.Create('Menge: Bitte eine gültige Zahl im Windows-Zahlenformat eingeben.');
+  LValue.UnitCode := Trim(PositionUnitCode.Text);
+  if not TryStrToCurr(Trim(PositionNetUnitPrice.Text), LValue.NetUnitPrice) then
+    raise EConvertError.Create('Netto-Einzelpreis (EUR): Bitte eine gültige Zahl im Windows-Zahlenformat eingeben.');
+  if not TryStrToCurr(Trim(PositionVatRate.Text), LValue.VatRate) then
+    raise EConvertError.Create('USt.-Satz (%): Bitte eine gültige Zahl im Windows-Zahlenformat eingeben.');
+  LValue.UnitCode := UpperCase(LValue.UnitCode);
+  ValidatePosition(LValue);
+  if FPositionIndex < 0 then
+    FPositionIndex := FData.Positions.Add(LValue)
+  else
+    FData.Positions[FPositionIndex] := LValue;
+  FPositionDirty := False;
+  MarkDirty;
+end;
+
+function TMiniAppMainForm.ConfirmPositionChange: Boolean;
+begin
+  Result := True;
+  if not FPositionDirty then
+    Exit;
+  case MessageDlg('Änderungen im aktuellen Positionseditor übernehmen?',
+    mtConfirmation, [mbYes, mbNo, mbCancel], 0) of
+    mrYes:
+      try
+        ApplyPosition;
+      except
+        on E: Exception do
+        begin
+          MessageDlg(E.Message, mtError, [mbOK], 0);
+          Result := False;
+        end;
+      end;
+    mrNo: FPositionDirty := False;
+  else
+    Result := False;
+  end;
+end;
+
+procedure TMiniAppMainForm.PositionSelected(Sender: TObject; Item: TListItem; Selected: Boolean);
+var
+  LIndex: Integer;
+begin
+  if FUpdating or not Selected then
+    Exit;
+  LIndex := Item.Index;
+  if LIndex = FPositionIndex then
+    Exit;
+  FUpdating := True;
+  try
+    if ConfirmPositionChange then
+    begin
+      FPositionIndex := LIndex;
+      RefreshPositions;
+      ShowPosition;
+    end
+    else if FPositionIndex >= 0 then
+      PositionList.Selected := PositionList.Items[FPositionIndex]
+    else
+      PositionList.Selected := nil;
+  finally
+    FUpdating := False;
+  end;
+end;
+
+procedure TMiniAppMainForm.PositionNewClick(Sender: TObject);
+begin
+  FUpdating := True;
+  try
+    if not ConfirmPositionChange then
+      Exit;
+    RefreshPositions;
+    FPositionIndex := -1;
+    ShowPosition;
+    PositionDescription.SetFocus;
+  finally
+    FUpdating := False;
+  end;
+end;
+
+procedure TMiniAppMainForm.PositionDeleteClick(Sender: TObject);
+begin
+  if (FPositionIndex < 0) and not FPositionDirty then
+    Exit;
+  if MessageDlg('Aktuellen Positionseintrag löschen?', mtConfirmation,
+    [mbYes, mbNo], 0) <> mrYes then
+    Exit;
+  FUpdating := True;
+  try
+    if FPositionIndex >= 0 then
+      FData.Positions.Delete(FPositionIndex);
+    FPositionIndex := -1;
+    RefreshPositions;
+    ShowPosition;
+    MarkDirty;
+  finally
+    FUpdating := False;
+  end;
+end;
+
+procedure TMiniAppMainForm.PositionApplyClick(Sender: TObject);
+begin
+  FUpdating := True;
+  try
+    try
+      ApplyPosition;
+      RefreshPositions;
+      ShowPosition;
+    except
+      on E: Exception do
+        MessageDlg(E.Message, mtError, [mbOK], 0);
+    end;
+  finally
+    FUpdating := False;
+  end;
+end;
+
+function TMiniAppMainForm.SaveData: Boolean;
+begin
+  Result := False;
+  FUpdating := True;
+  try
+    try
+      ApplyCustomer;
+      RefreshCustomers;
+      ApplyPosition;
+      RefreshPositions;
+      ReadSeller;
+      FData.SaveToFile;
+      RefreshCustomers;
+      RefreshPositions;
+      ShowCustomer;
+      ShowPosition;
+      ShowSeller;
+      FDirty := False;
+      SaveState.Caption := 'Gespeichert: ' + MasterDataPath;
+      SaveState.Hint := SaveState.Caption;
+      Log('Stammdaten gespeichert.');
+      Result := True;
+    except
+      on E: Exception do
+      begin
+        Log('Speichern fehlgeschlagen: ' + E.Message, lkError);
+        MessageDlg('Stammdaten konnten nicht gespeichert werden: ' + E.Message,
+          mtError, [mbOK], 0);
+      end;
+    end;
+  finally
+    FUpdating := False;
+  end;
+end;
+
+procedure TMiniAppMainForm.SaveClick(Sender: TObject);
+begin
+  SaveData;
+end;
+
+procedure TMiniAppMainForm.FormCloseQuery(Sender: TObject; var CanClose: Boolean);
+begin
+  CanClose := True;
+  if not FDirty then
+    Exit;
+  case MessageDlg('Änderungen vor dem Schließen speichern?', mtConfirmation,
+    [mbYes, mbNo, mbCancel], 0) of
+    mrYes: CanClose := SaveData;
+    mrNo: CanClose := True;
+  else
+    CanClose := False;
+  end;
+end;
+
+end.

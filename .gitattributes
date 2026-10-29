@@ -1,0 +1,2 @@
+# PDFs nie als Text behandeln (autocrlf wuerde xref-Offsets zerstoeren)
+*.pdf binary
