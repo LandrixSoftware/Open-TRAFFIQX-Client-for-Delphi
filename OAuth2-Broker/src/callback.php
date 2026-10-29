@@ -8,7 +8,8 @@ use Landrix\OAuth2\LandrixOAuthProvider;
 use League\OAuth2\Client\Provider\Exception\IdentityProviderException;
 
 $rawState = $_GET['state'] ?? null;
-if ($rawState === null || $rawState === '') {
+// ?state[]=x liefert ein Array: neutral abweisen statt TypeError/HTTP 500.
+if (!is_string($rawState) || $rawState === '') {
     renderCallbackView(false, 'State fehlt.');
 }
 
@@ -34,8 +35,15 @@ if (($session['status'] ?? null) !== 'pending') {
 }
 $sessionExpiresAt = isset($session['expiresAt']) ? strtotime((string)$session['expiresAt']) : false;
 if ($sessionExpiresAt === false || $sessionExpiresAt < time()) {
-    $store->delete($sessionId);
+    $store->delete($sessionId, $session);
     renderCallbackView(false, 'Session wurde nicht gefunden oder ist abgelaufen.');
+}
+
+// Erneute Prüfung unter exklusiver Sperre: nur ein Callback erhält den
+// Bearbeiter-Token. Der anschließende Provider-Aufruf hält keine Dateisperre.
+$session = $store->beginProcessing($sessionId, (string)$rawState);
+if ($session === null) {
+    renderCallbackView(false, 'Diese Anmeldung wurde bereits abgeschlossen oder ist abgelaufen.');
 }
 
 if (!empty($_GET['error'])) {
@@ -45,7 +53,7 @@ if (!empty($_GET['error'])) {
         'description' => limitText((string)($_GET['error_description'] ?? '')),
     ];
     $session['updatedAt'] = gmdate('c');
-    $store->write($session);
+    completeCallback($session);
     renderCallbackView(false, 'Der Provider hat einen Fehler gemeldet: ' . $session['error']['description']);
 }
 
@@ -56,7 +64,7 @@ if (empty($_GET['code'])) {
         'description' => 'Autorisierungscode fehlt.',
     ];
     $session['updatedAt'] = gmdate('c');
-    $store->write($session);
+    completeCallback($session);
     renderCallbackView(false, 'Autorisierungscode fehlt.');
 }
 
@@ -103,7 +111,7 @@ try {
     $session['error'] = null;
     $session['updatedAt'] = gmdate('c');
 
-    $store->write($session);
+    completeCallback($session);
 
     renderCallbackView(true, appConfig()['callback']['successMessage'] ?? 'Vorgang abgeschlossen.');
 } catch (IdentityProviderException $e) {
@@ -115,19 +123,29 @@ try {
         'description' => limitText($e->getMessage()),
     ];
     $session['updatedAt'] = gmdate('c');
-    $store->write($session);
+    completeCallback($session);
     renderCallbackView(false, 'Token konnte nicht abgeholt werden.');
 } catch (\Throwable $e) {
     // Interne Details (Pfade, Netzwerkfehler) nur ins Server-Log, nicht zum Client.
     error_log('OAuth2-Broker callback ' . $sessionId . ': ' . $e->getMessage());
+    // Scheiterte erst das Speichern des Erfolgs, keine Tokens im Fehlerstand liegen lassen.
+    $session['tokens'] = null;
     $session['status'] = 'error';
     $session['error'] = [
         'code' => 'unexpected_error',
         'description' => 'Der Token-Abruf beim Provider ist fehlgeschlagen.',
     ];
     $session['updatedAt'] = gmdate('c');
-    $store->write($session);
+    completeCallback($session);
     renderCallbackView(false, 'Unerwarteter Fehler.');
+}
+
+/** Ein verspätetes Ergebnis weder speichern noch als erfolgreichen Abschluss anzeigen. */
+function completeCallback(array $session): void
+{
+    if (!sessionStore()->completeProcessing($session)) {
+        renderCallbackView(false, 'Session wurde bereits abgeholt oder ist nicht mehr verfügbar.');
+    }
 }
 
 function renderCallbackView(bool $success, string $message): void

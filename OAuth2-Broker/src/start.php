@@ -17,10 +17,6 @@ $sessionId = sanitizeSessionId(requireString($payload, 'sessionId'));
 $provider = extractProviderSetup($payload);
 
 $store = sessionStore();
-if ($store->exists($sessionId)) {
-    errorResponse(409, 'session_exists', 'SessionId ist bereits vergeben.');
-}
-
 try {
     $pkce = generatePkcePair();
     // Unvorhersehbarer state-Token gegen CSRF/Authorization-Code-Injection.
@@ -41,8 +37,6 @@ try {
         'tokens' => null,
         'error' => null,
     ];
-
-    $store->write($sessionRecord);
 
     $extraParams = $provider['extraParams'];
     $enableWindowsSso = $extraParams['enableWindowsSso'] ?? null;
@@ -77,10 +71,15 @@ try {
 
     $authorizationUrl = $oauthProvider->getAuthorizationUrl($authorizationParams);
 
+    // Erst nach erfolgreicher Vorbereitung atomar anlegen. Ein konkurrierender
+    // Start darf weder überschrieben noch im Fehlerpfad gelöscht werden.
+    if (!$store->create($sessionRecord)) {
+        errorResponse(409, 'session_exists', 'SessionId ist bereits vergeben.');
+    }
+
     header('Location: ' . $authorizationUrl, true, 302);
     exit;
 } catch (\Throwable $e) {
-    $store->delete($sessionId);
     // Details nur ins Server-Log; der Client erhaelt eine neutrale Meldung.
     error_log('OAuth2-Broker start ' . $sessionId . ': ' . $e->getMessage());
     errorResponse(500, 'start_failed', 'Start konnte nicht vorbereitet werden.');

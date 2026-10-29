@@ -133,7 +133,7 @@ Alle URLs müssen `https` verwenden (`providerRedirectUri` für lokale Tests auc
 
 ### `GET /callback`
 
-Wird vom OAuth2-Provider nach der Anmeldung aufgerufen. Der Broker prüft `state`, ob die Session noch offen (`pending`) und nicht abgelaufen ist, tauscht `code` gegen Tokens und speichert das Ergebnis im `session-store`. Ein zweiter Aufruf für dieselbe Session wird abgewiesen. Bei technischen Fehlern erhält der Client nur eine neutrale Meldung, die Einzelheiten landen im PHP-Fehlerlog des Servers. Dieser Endpunkt wird normalerweise nicht manuell aufgerufen.
+Wird vom OAuth2-Provider nach der Anmeldung aufgerufen. Der Broker prüft `state` und übernimmt eine offene, nicht abgelaufene Session unter exklusiver Sperre von `pending` nach `processing`. Nur dieser Callback tauscht `code` gegen Tokens; parallele oder wiederholte Callbacks werden ohne Token-Abruf abgewiesen. Ein zufälliger interner Bearbeiter-Token erlaubt das abschließende Schreiben von `success` oder `error` nur, solange dieselbe Session noch im zugehörigen Zustand `processing` existiert. Gelöschte oder abgeholte Sessions werden durch verspätete Ergebnisse nicht neu angelegt. Bei technischen Fehlern erhält der Client nur eine neutrale Meldung, die Einzelheiten landen im PHP-Fehlerlog des Servers. Dieser Endpunkt wird normalerweise nicht manuell aufgerufen.
 
 ### `GET /poll?sessionId=...`
 
@@ -144,7 +144,7 @@ curl -s "https://example.test/poll?sessionId=demo-session-001" \
         -H "X-Api-Key: EIN_LANGER_ZUFAELLIGER_API_KEY"
 ```
 
-Antwort während der Anmeldung:
+Antwort während der Anmeldung (auch während des internen Zustands `processing`):
 
 ```json
 {
@@ -177,6 +177,16 @@ Antwort nach erfolgreicher Anmeldung:
 ```
 
 Nach `success` oder `error` löscht `/poll` die Session-Datei. Tokens werden dadurch nur einmal ausgeliefert.
+
+## Gleichzeitige Zugriffe und Session-Dateien
+
+Alle Store-Zugriffe verwenden dieselbe dauerhafte Datei `.store.lock`: Lesen unter `LOCK_SH`, Anlegen, Zustandswechsel, Abholen, Löschen und Aufräumen unter `LOCK_EX`. Gesperrt werden nur Dateioperationen; während des Provider-Aufrufs können andere Sessions und Polls weiterarbeiten. Schreibvorgänge erzeugen eine Datei `<sessionId>.json.tmp-<Zufall>` im selben Verzeichnis und ersetzen das JSON nach dem Schließen per `rename()`. Ein fehlgeschlagener Austausch lässt die bisherige Datei bestehen. Parallele `/start`-Aufrufe derselben ID ergeben einmal Erfolg und ansonsten `409 session_exists`.
+
+`claim()` akzeptiert nur `success`/`error` und verschiebt die Datei unter derselben Sperre nach `<sessionId>.json.claim-<Zufall>`, bevor sie gelöscht wird. `pending`/`processing` werden nicht abgeholt. Cleanup prüft JSON-Dateien unter exklusiver Sperre und entfernt abgelaufene, zu alte oder weiterhin defekte Dateien. Verwaiste Temp-/Claim-Dateien werden nach `cleanupAfterSeconds` entfernt. Nach einem abgebrochenen Callback bleibt `processing` bis zum Ablauf/Aufräumen bestehen; der Client sieht weiterhin `pending` und kann nach seinem Timeout eine neue Anmeldung mit neuer Session-ID beginnen.
+
+Das Verzeichnis erhält unter Unix `0700`, neue JSON-, Temp-, Lock- und Marker-Dateien `0600`. Unter Windows müssen zusätzlich passende NTFS-Zugriffsrechte gesetzt sein. `.store.lock` bleibt absichtlich dauerhaft bestehen und darf im laufenden Betrieb nicht gelöscht oder ersetzt werden: Wartende könnten sonst unterschiedliche Dateien sperren. Es gibt keine Lock-Dateien pro Session, die sich ansammeln. `.last-cleanup` drosselt das Aufräumen; Prüfung und Aktualisierung erfolgen ebenfalls unter der Store-Sperre.
+
+Beim Ausrollen alle Broker-Dateien gemeinsam austauschen und vorher laufende Requests beenden/auslaufen lassen (Wartungsfenster), damit alte ungesperrte und neue gesperrte Zugriffe nicht gleichzeitig stattfinden. Bestehende Session-JSONs benötigen keine Migration. Der PHP-Benutzer muss Eigentümer des Store-Verzeichnisses sein und Dateien darin erstellen, umbenennen und löschen sowie die Rechte setzen können. Ein lokales Dateisystem mit funktionierendem `flock` und `rename` verwenden.
 
 ## Fehlerfälle
 
@@ -239,3 +249,5 @@ curl http://127.0.0.1:8080/
 ```
 
 Erwartet wird eine JSON-Antwort mit `"status":"ok"`. Für einen vollständigen OAuth2-Test muss der Provider die lokale oder öffentliche Callback-URL erreichen können und die Redirect-URI exakt registriert sein.
+
+Für einen Parallelitätstest ein separates temporäres Session-Verzeichnis verwenden: Zwei Bearbeiter mit `beginProcessing()` auf dieselbe Session ansetzen (genau einer gewinnt), während `processing` ein `claim()` versuchen (liefert `null`), anschließend mit `completeProcessing()` abschließen und zweimal abholen (nur einmal erfolgreich). Nach Löschen oder Abholen muss ein verspäteter Abschluss `false` liefern und die Datei fehlen. Parallel große JSON-Dateien schreiben, lesen und `cleanup()` ausführen; gültige Sessions müssen lesbar bleiben. Auch alte Temp-/Claim-Dateien, defektes JSON und Dateirechte prüfen. Syntaxprüfung: `php -l` für `src/Support/SessionStore.php`, `src/start.php`, `src/callback.php` und `src/poll.php`. Den Dateiaustausch auf Windows und auf dem Linux-Zielsystem prüfen; PHPs eingebauter Server unter Windows genügt allein nicht zum Nachweis paralleler Requests, dafür mehrere CLI-Prozesse verwenden.

@@ -4,11 +4,10 @@ declare(strict_types=1);
 
 namespace Landrix\OAuth2\Support;
 
+use JsonException;
 use RuntimeException;
 
-/**
- * Persistiert Sitzungsdaten als JSON-Dateien außerhalb des Webroots.
- */
+/** Persistiert Sitzungsdaten als JSON-Dateien außerhalb des Webroots. */
 class SessionStore
 {
     private string $directory;
@@ -35,117 +34,260 @@ class SessionStore
 
     public function exists(string $sessionId): bool
     {
-        return is_file($this->pathFor($sessionId));
+        return $this->withLock(LOCK_SH, fn(): bool => is_file($this->pathFor($sessionId)));
     }
 
     public function read(string $sessionId): ?array
+    {
+        return $this->withLock(LOCK_SH, fn(): ?array => $this->readUnlocked($sessionId));
+    }
+
+    public function write(array $session): void
+    {
+        $this->withLock(LOCK_EX, function () use ($session): void {
+            $this->writeUnlocked($session);
+        });
+    }
+
+    /** Auch parallele /start-Aufrufe dürfen keine bestehende Session ersetzen. */
+    public function create(array $session): bool
+    {
+        return $this->withLock(LOCK_EX, function () use ($session): bool {
+            if (is_file($this->pathFor($session['sessionId']))) {
+                return false;
+            }
+            $this->writeUnlocked($session);
+            return true;
+        });
+    }
+
+    /** Prüfen und Übernehmen sind atomar; der HTTP-Token-Tausch folgt ohne Sperre. */
+    public function beginProcessing(string $sessionId, string $state): ?array
+    {
+        return $this->withLock(LOCK_EX, function () use ($sessionId, $state): ?array {
+            $session = $this->readUnlocked($sessionId);
+            if ($session === null || ($session['status'] ?? null) !== 'pending'
+                || !is_string($session['state'] ?? null) || !hash_equals($session['state'], $state)) {
+                return null;
+            }
+            $expiresAt = strtotime((string)($session['expiresAt'] ?? ''));
+            if ($expiresAt === false || $expiresAt < time()) {
+                $this->removeFile($this->pathFor($sessionId));
+                return null;
+            }
+
+            $session['status'] = 'processing';
+            $session['processingToken'] = bin2hex(random_bytes(32));
+            $session['updatedAt'] = gmdate('c');
+            $this->writeUnlocked($session);
+            return $session;
+        });
+    }
+
+    /** Nur der aktuelle Bearbeiter darf abschließen; niemals eine Datei neu anlegen. */
+    public function completeProcessing(array $session): bool
+    {
+        return $this->withLock(LOCK_EX, function () use ($session): bool {
+            $current = $this->readUnlocked($session['sessionId']);
+            if ($current === null || ($current['status'] ?? null) !== 'processing'
+                || !is_string($current['processingToken'] ?? null)
+                || !is_string($session['processingToken'] ?? null)
+                || !hash_equals($current['processingToken'], $session['processingToken'])
+                || !in_array($session['status'] ?? null, ['success', 'error'], true)) {
+                return false;
+            }
+            unset($session['processingToken']);
+            $this->writeUnlocked($session);
+            return true;
+        });
+    }
+
+    /** Mit Vergleichswert keine inzwischen geänderte oder neu gestartete Session löschen. */
+    public function delete(string $sessionId, ?array $expected = null): bool
+    {
+        return $this->withLock(LOCK_EX, function () use ($sessionId, $expected): bool {
+            if ($expected !== null && $this->readUnlocked($sessionId) !== $expected) {
+                return false;
+            }
+            return $this->removeFile($this->pathFor($sessionId));
+        });
+    }
+
+    /** Terminale Sessions genau einmal abholen; pending/processing bleiben bestehen. */
+    public function claim(string $sessionId, ?array $expected = null): ?array
+    {
+        return $this->withLock(LOCK_EX, function () use ($sessionId, $expected): ?array {
+            $session = $this->readUnlocked($sessionId);
+            if ($session === null || ($expected !== null && $session !== $expected)
+                || !in_array($session['status'] ?? null, ['success', 'error'], true)) {
+                return null;
+            }
+            $expiresAt = strtotime((string)($session['expiresAt'] ?? ''));
+            if ($expiresAt === false || $expiresAt < time()) {
+                return null;
+            }
+
+            $path = $this->pathFor($sessionId);
+            $claimedPath = $path . '.claim-' . bin2hex(random_bytes(8));
+            if (!rename($path, $claimedPath)) {
+                throw new RuntimeException('Session konnte nicht abgeholt werden.');
+            }
+            // Bei einem Prozessabbruch entfernt cleanup() die verwaiste Claim-Datei.
+            @unlink($claimedPath);
+            return $session;
+        });
+    }
+
+    public function cleanup(): int
+    {
+        return $this->withLock(LOCK_EX, fn(): int => $this->cleanupUnlocked());
+    }
+
+    public function cleanupIfDue(): void
+    {
+        $this->withLock(LOCK_EX, function (): void {
+            $marker = $this->markerPath();
+            // Prüfung und Marker-Update unter derselben Sperre: nur ein Scanner.
+            if (is_file($marker) && (time() - (int)filemtime($marker)) < $this->cleanupAfterSeconds) {
+                return;
+            }
+            $this->cleanupUnlocked();
+        });
+    }
+
+    /** Alle *Unlocked-Helfer ausschließlich innerhalb von withLock() aufrufen. */
+    private function readUnlocked(string $sessionId): ?array
     {
         $path = $this->pathFor($sessionId);
         if (!is_file($path)) {
             return null;
         }
-
         $json = file_get_contents($path);
         if ($json === false) {
             throw new RuntimeException('Session-Datei konnte nicht gelesen werden.');
         }
-
-        return json_decode($json, true, 512, JSON_THROW_ON_ERROR);
+        $session = json_decode($json, true, 512, JSON_THROW_ON_ERROR);
+        if (!is_array($session)) {
+            throw new JsonException('Session-Datei enthält kein Objekt.');
+        }
+        return $session;
     }
 
-    public function write(array $session): void
+    private function writeUnlocked(array $session): void
     {
         if (empty($session['sessionId'])) {
             throw new RuntimeException('SessionId fehlt.');
         }
-
         $payload = json_encode($session, JSON_PRETTY_PRINT | JSON_THROW_ON_ERROR);
-        $result = file_put_contents($this->pathFor($session['sessionId']), $payload, LOCK_EX);
-        if ($result === false) {
-            throw new RuntimeException('Session-Datei konnte nicht geschrieben werden.');
-        }
-    }
-
-    public function delete(string $sessionId): void
-    {
-        $path = $this->pathFor($sessionId);
-        if (is_file($path)) {
-            @unlink($path);
-        }
-    }
-
-    /**
-     * Beansprucht eine Session atomar und liefert ihren Inhalt genau einmal.
-     * Der erste Aufrufer gewinnt das atomare rename(), alle weiteren erhalten null.
-     * Schützt die einmalige Token-Auslieferung gegen parallele /poll-Requests.
-     */
-    public function claim(string $sessionId): ?array
-    {
-        $path = $this->pathFor($sessionId);
-        $tmp = $path . '.claim-' . bin2hex(random_bytes(8));
-
-        if (!@rename($path, $tmp)) {
-            return null;
-        }
-
+        $path = $this->pathFor($session['sessionId']);
+        $temporaryPath = $path . '.tmp-' . bin2hex(random_bytes(8));
+        $file = $this->openPrivateFile($temporaryPath, 'x+b');
         try {
-            $json = file_get_contents($tmp);
-            if ($json === false) {
-                return null;
+            if (fwrite($file, $payload) !== strlen($payload) || !fflush($file)) {
+                throw new RuntimeException('Session-Datei konnte nicht geschrieben werden.');
             }
-
-            return json_decode($json, true, 512, JSON_THROW_ON_ERROR);
+            // Vor rename schließen, insbesondere für Windows. Niemals vorher unlink:
+            // Schlägt der Austausch fehl, bleibt die bisherige Session erhalten.
+            fclose($file);
+            $file = null;
+            if (!rename($temporaryPath, $path)) {
+                throw new RuntimeException('Session-Datei konnte nicht ersetzt werden.');
+            }
         } finally {
-            @unlink($tmp);
+            if (is_resource($file)) {
+                fclose($file);
+            }
+            if (is_file($temporaryPath)) {
+                @unlink($temporaryPath);
+            }
         }
     }
 
-    public function cleanup(): int
+    private function cleanupUnlocked(): int
     {
         $removed = 0;
         $now = time();
-        $globPattern = $this->directory . DIRECTORY_SEPARATOR . '*.json';
-        foreach (glob($globPattern) as $file) {
-            $content = file_get_contents($file);
-            if ($content === false) {
-                continue;
-            }
-
+        foreach (glob($this->directory . DIRECTORY_SEPARATOR . '*.json') ?: [] as $file) {
             try {
-                $data = json_decode($content, true, 512, JSON_THROW_ON_ERROR);
-            } catch (\Throwable $e) {
-                @unlink($file);
-                $removed++;
+                $data = $this->readUnlocked(basename($file, '.json'));
+            } catch (JsonException $e) {
+                // Unter exklusiver Sperre gelesen: kein halbfertiger Schreiber.
+                $removed += (int)$this->removeFile($file);
                 continue;
             }
-
-            $expiresAt = isset($data['expiresAt']) ? strtotime((string)$data['expiresAt']) : null;
-            $updatedAt = isset($data['updatedAt']) ? strtotime((string)$data['updatedAt']) : null;
-            $isExpired = $expiresAt !== null && $expiresAt < $now;
-            $tooOld = $updatedAt !== null && ($now - $updatedAt) > $this->cleanupAfterSeconds;
-
-            if ($isExpired || $tooOld) {
-                @unlink($file);
-                $removed++;
+            $expiresAt = strtotime((string)($data['expiresAt'] ?? ''));
+            $updatedAt = strtotime((string)($data['updatedAt'] ?? ''));
+            if (($expiresAt !== false && $expiresAt < $now)
+                || ($updatedAt !== false && ($now - $updatedAt) > $this->cleanupAfterSeconds)) {
+                $removed += (int)$this->removeFile($file);
             }
         }
 
-        @touch($this->markerPath());
+        // Keine aktiven Dateioperationen unter LOCK_EX. Junge Überreste trotzdem
+        // schonen; alte Temp-/Claim-Dateien enthalten möglicherweise Tokens.
+        foreach (['*.json.tmp-*', '*.json.claim-*'] as $pattern) {
+            foreach (glob($this->directory . DIRECTORY_SEPARATOR . $pattern) ?: [] as $file) {
+                $modifiedAt = filemtime($file);
+                if ($modifiedAt !== false && ($now - $modifiedAt) > $this->cleanupAfterSeconds) {
+                    $removed += (int)$this->removeFile($file);
+                }
+            }
+        }
+        $marker = $this->openPrivateFile($this->markerPath(), 'c+b');
+        fclose($marker);
+        touch($this->markerPath());
         return $removed;
     }
 
-    public function cleanupIfDue(): void
+    private function removeFile(string $path): bool
     {
-        $marker = $this->markerPath();
-        // Drosselung ueber die mtime der Marker-Datei – wirkt requestuebergreifend,
-        // da der Zustand im Dateisystem und nicht nur im Objekt liegt.
-        if (is_file($marker) && (time() - (int)@filemtime($marker)) < $this->cleanupAfterSeconds) {
-            return;
+        if (!is_file($path)) {
+            return false;
         }
+        if (!unlink($path)) {
+            throw new RuntimeException('Session-Datei konnte nicht gelöscht werden.');
+        }
+        return true;
+    }
 
-        // Marker sofort setzen, damit parallele Requests nicht gleichzeitig scannen.
-        @touch($marker);
-        $this->cleanup();
+    /**
+     * Stabile Store-Sperre für alle Dateioperationen, keine Netzaufrufe darunter.
+     * Die Lock-Datei nie löschen/ersetzen: Wartende könnten sonst verschiedene
+     * Inodes sperren. Es entstehen keine verwaisten Locks pro Session.
+     */
+    private function withLock(int $mode, callable $operation): mixed
+    {
+        $lock = $this->openPrivateFile($this->directory . DIRECTORY_SEPARATOR . '.store.lock', 'c+b');
+        try {
+            if (!flock($lock, $mode)) {
+                throw new RuntimeException('Session-Store konnte nicht gesperrt werden.');
+            }
+            // PHPs Stat-Cache darf nach dem Warten keine alten Dateidaten liefern.
+            clearstatcache();
+            return $operation();
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
+    }
+
+    /** Restriktive Rechte schon bei der Anlage, auch für Lock-/Temp-/Marker-Dateien. */
+    private function openPrivateFile(string $path, string $mode)
+    {
+        $previousMask = umask(0077);
+        try {
+            $file = fopen($path, $mode);
+        } finally {
+            umask($previousMask);
+        }
+        if ($file === false) {
+            throw new RuntimeException('Session-Store-Datei konnte nicht geöffnet werden.');
+        }
+        if (!chmod($path, 0600)) {
+            fclose($file);
+            throw new RuntimeException('Session-Dateirechte konnten nicht gesetzt werden.');
+        }
+        return $file;
     }
 
     private function markerPath(): string
@@ -157,6 +299,9 @@ class SessionStore
     {
         if (!is_dir($this->directory) && !mkdir($this->directory, 0700, true) && !is_dir($this->directory)) {
             throw new RuntimeException('Session-Verzeichnis konnte nicht erstellt werden: ' . $this->directory);
+        }
+        if (!chmod($this->directory, 0700)) {
+            throw new RuntimeException('Session-Verzeichnisrechte konnten nicht gesetzt werden.');
         }
     }
 }

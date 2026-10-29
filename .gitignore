@@ -14,6 +14,7 @@ CLAUDE.local.md
 .cursorrules
 GEMINI.md
 
+BACKLOG.md
 OAuth2-Broker/config/app.local.php
 OAuth2-Broker/composer.phar
 OAuth2-Broker/composer-setup.php

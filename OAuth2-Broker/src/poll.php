@@ -26,13 +26,14 @@ if (($session['apiKeyId'] ?? null) !== $apiKeyMeta['id']) {
 $now = time();
 $expiresAt = isset($session['expiresAt']) ? strtotime((string)$session['expiresAt']) : null;
 if ($expiresAt !== null && $expiresAt < $now) {
-    $store->delete($sessionId);
+    $store->delete($sessionId, $session);
     errorResponse(410, 'session_expired', 'Session ist abgelaufen.');
 }
 
 $status = $session['status'] ?? 'pending';
 
-if ($status === 'pending') {
+// Der Delphi-Client kennt nur pending/success/error; processing bleibt intern.
+if ($status === 'pending' || $status === 'processing') {
     jsonResponse(200, [
         'sessionId' => $sessionId,
         'status' => 'pending',
@@ -45,8 +46,9 @@ if ($status !== 'success' && $status !== 'error') {
 }
 
 // Terminaler Status: Session atomar beanspruchen, damit parallele Polls die
-// Tokens nicht doppelt erhalten. Wer das rename verliert, bekommt 404.
-$claimed = $store->claim($sessionId);
+// Tokens nicht doppelt erhalten. Unter der Sperre auch den gelesenen Stand
+// vergleichen, damit eine neu gestartete Session nicht versehentlich abgeholt wird.
+$claimed = $store->claim($sessionId, $session);
 if ($claimed === null) {
     errorResponse(404, 'unknown_session', 'Session wurde nicht gefunden.');
 }
