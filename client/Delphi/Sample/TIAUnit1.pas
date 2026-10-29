@@ -190,6 +190,7 @@ type
       ATargetBrowser: TEdgeBrowser);
     procedure HandlePollingCompleted(const AResult: TTraffiqxPollResult; ASender : TTRAFFIQXInvoiceAPI);
     procedure PopulateOutboxTestCases;
+    function TryRevokeTokens(ATIA: TTRAFFIQXInvoiceAPI): Boolean;
     // Tokens verschluesselt in cfg.ini (DPAPI, an den Windows-Benutzer
     // gebunden; intf.TRAFFIQXTokenProtection). Nicht lesbar (anderer
     // Benutzer/Rechner) = leer, also neu anmelden.
@@ -327,6 +328,7 @@ function TForm1.IsReloginRequiredMessage(const AMessage: string): Boolean;
 var
   LMessage: string;
 begin
+  // Rueckfall fuer lokale Vorpruefungen und unstrukturierte Transportfehler.
   LMessage := LowerCase(Trim(AMessage));
   Result := (Pos('refresh-token', LMessage) > 0)
     or (Pos('refreshtoken', LMessage) > 0)
@@ -557,6 +559,8 @@ begin
       FTIA[i].RefreshToken := ReadToken(lPrefix,'refreshtoken');
       FTIA[i].AccessTokenExpiresAt := FConfiguration.ReadFloat(lPrefix,'accesstokenexpiresat',0);
       FTIA[i].RefreshTokenExpiresAt := FConfiguration.ReadFloat(lPrefix,'refreshtokenexpiresat',0);
+      if FConfiguration.ReadBool(lPrefix, 'revocationpending', False) then
+        Memo1.Lines.Add(lPrefix + ': Widerruf ausstehend. Mit "Login" erneut widerrufen.');
 
       //Env
       FTIA[i].ClientID := lEnv.Values[lPrefix + '_CLIENT_ID'];
@@ -644,13 +648,61 @@ begin
     FTIA[i].Free;
 end;
 
+function TForm1.TryRevokeTokens(ATIA: TTRAFFIQXInvoiceAPI): Boolean;
+var
+  LPrefix: string;
+  LProviderIndex: Integer;
+  LError: TTraffiqxError;
+begin
+  Result := False;
+  LPrefix := ProviderEnvPrefix(ATIA.ProviderType);
+  LProviderIndex := Integer(ATIA.ProviderType);
+  LError := nil;
+  // Vor dem Netzwerkzugriff sichern: auch nach Abbruch/Neustart erneut widerrufbar.
+  FConfiguration.WriteBool(LPrefix, 'revocationpending', True);
+  FConfiguration.UpdateFile;
+  try
+    try
+      if not ATIA.RevokeTokens(LError) then
+      begin
+        if Assigned(LError) then
+          ShowApiError(LError);
+        Exit;
+      end;
+      // RevokeTokens leert die Instanz erst nach vollstaendigem Widerruf.
+      WriteToken(LPrefix, 'accesstoken', '');
+      WriteToken(LPrefix, 'refreshtoken', '');
+      FConfiguration.WriteFloat(LPrefix, 'accesstokenexpiresat', 0);
+      FConfiguration.WriteFloat(LPrefix, 'refreshtokenexpiresat', 0);
+      FConfiguration.WriteBool(LPrefix, 'revocationpending', False);
+      FConfiguration.UpdateFile;
+      edAccessTokenReference[LProviderIndex].Text := '';
+      edAccessTokenReference[LProviderIndex].EditLabel.Caption := 'expires at: ';
+      edRefreshTokenReference[LProviderIndex].Text := '';
+      Memo1.Lines.Add('Token-Revocation erfolgreich abgeschlossen.');
+      Result := True;
+    except
+      on E: Exception do
+        Memo1.Lines.Add('Token-Revocation konnte nicht abgeschlossen werden (' + E.ClassName + ').');
+    end;
+  finally
+    LError.Free;
+    if not Result then
+    begin
+      Memo1.Lines.Add('Widerruf ausstehend. Tokens bleiben gespeichert. Mit "Login" erneut widerrufen.');
+      MessageDlg('Widerruf ausstehend. Die Tokens bleiben fuer einen erneuten Widerruf gespeichert.'
+        + sLineBreak + 'Es wird keine neue Anmeldung gestartet. Mit "Login" erneut versuchen.',
+        mtWarning, [mbOK], 0);
+    end;
+  end;
+end;
+
 procedure TForm1.HandlePollingCompleted(const AResult: TTraffiqxPollResult; ASender : TTRAFFIQXInvoiceAPI);
 var
   lPrefix : String;
   LErrorMessage: string;
   LProviderIndex: Integer;
   LConnectionError: TTraffiqxError;
-  LRevocationError: TTraffiqxError;
 begin
   case AResult.Status of
     psSuccess:
@@ -666,6 +718,7 @@ begin
         WriteToken(lPrefix,'refreshtoken',ASender.RefreshToken);
         FConfiguration.WriteFloat(lPrefix,'accesstokenexpiresat',ASender.AccessTokenExpiresAt);
         FConfiguration.WriteFloat(lPrefix,'refreshtokenexpiresat',ASender.RefreshTokenExpiresAt);
+        FConfiguration.WriteBool(lPrefix, 'revocationpending', False);
         FConfiguration.UpdateFile;
         Memo1.Lines.Add('Polling abgeschlossen: Tokens aktualisiert.');
 
@@ -681,32 +734,7 @@ begin
             LConnectionError.Free;
           end;
 
-          LRevocationError := nil;
-          try
-            if ASender.RevokeTokens(LRevocationError) then
-              Memo1.Lines.Add('Token-Revocation erfolgreich abgeschlossen.')
-            else
-            begin
-              Memo1.Lines.Add('Token-Revocation konnte nicht abgeschlossen werden.');
-              if Assigned(LRevocationError) then
-                ShowApiError(LRevocationError);
-            end;
-          finally
-            LRevocationError.Free;
-          end;
-
-          ASender.AccessToken := '';
-          ASender.RefreshToken := '';
-          ASender.AccessTokenExpiresAt := 0;
-          ASender.RefreshTokenExpiresAt := 0;
-          edAccessTokenReference[LProviderIndex].Text := '';
-          edAccessTokenReference[LProviderIndex].EditLabel.Caption := 'expires at: ';
-          edRefreshTokenReference[LProviderIndex].Text := '';
-          WriteToken(lPrefix,'accesstoken','');
-          WriteToken(lPrefix,'refreshtoken','');
-          FConfiguration.WriteFloat(lPrefix,'accesstokenexpiresat',0);
-          FConfiguration.WriteFloat(lPrefix,'refreshtokenexpiresat',0);
-          FConfiguration.UpdateFile;
+          TryRevokeTokens(ASender);
         end;
       end;
     psError:
@@ -901,12 +929,22 @@ begin
 end;
 
 procedure TForm1.btLoginClick(Sender: TObject);
+var
+  LTIA: TTRAFFIQXInvoiceAPI;
 begin
+  LTIA := FTIA[PageControl1.ActivePageIndex+1];
   if FTIA[PageControl1.ActivePageIndex+1].OAuth2BrokerCallbackUri = '' then
   begin
     Memo1.Lines.Add('OAUTH2_BROKER_CALLBACK_URI fehlt in der .env (Adresse des eigenen Brokers).');
     exit;
   end;
+
+  // Eine laufende Anmeldung abbrechen, bevor die vorhandene Sitzung ersetzt wird.
+  LTIA.CancelPolling;
+  if (LTIA.AccessToken <> '') or (LTIA.RefreshToken <> '')
+    or FConfiguration.ReadBool(ProviderEnvPrefix(LTIA.ProviderType), 'revocationpending', False) then
+    if not TryRevokeTokens(LTIA) then
+      Exit;
 
   FTIA[PageControl1.ActivePageIndex+1].Environment :=
     DefaultEnvironmentForProvider(FTIA[PageControl1.ActivePageIndex+1].ProviderType);
@@ -942,6 +980,13 @@ var
 begin
   lTIA := FTIA[PageControl1.ActivePageIndex+1];
 
+  if FConfiguration.ReadBool(ProviderEnvPrefix(lTIA.ProviderType), 'revocationpending', False) then
+  begin
+    MessageDlg('Widerruf ausstehend. Bitte mit "Login" zuerst den Widerruf erneut versuchen.',
+      mtWarning, [mbOK], 0);
+    Exit;
+  end;
+
   if not lTIA.TryFetchWellKnownEndpoints then
     Memo1.Lines.Add('Fehler beim Abrufen der well-known-Endpunkte - Default wird genommen.');
 
@@ -949,6 +994,16 @@ begin
     if not lTIA.RefreshAccessToken then
       Exit;
   except
+    on E: ETraffiqxTokenError do
+    begin
+      Memo1.Lines.Add('Refresh Fehler: ' + E.Message);
+      // Klassifikation vor Schwaerzung/Kuerzung, auch bei anderem OAuth-Code.
+      if E.IsInvalidGrant then
+        ShowReloginHint(E.Message)
+      else
+        MessageDlg(E.Message, mtError, [mbOK], 0);
+      Exit;
+    end;
     on E: Exception do
     begin
       Memo1.Lines.Add('Refresh Fehler: ' + E.Message);
@@ -1420,10 +1475,16 @@ begin
   lDocumentId := ListView2.Selected.Caption;
   lTIA := FTIA[PageControl1.ActivePageIndex+1];
   lWaitStatus := nil;
+  lPendingStatus := nil;
+  lApiResult := nil;
+  lApiError := nil;
+  lMetadata := nil;
   Memo3.Clear;
 
   Screen.Cursor := crHourGlass;
   try
+    // Dieses Sample wartet der Einfachheit halber im Hauptthread. In VCL-
+    // Anwendungen im Worker warten; UI-Aenderungen ueber TThread.Queue zustellen.
     if not lTIA.WaitForOutboxDocumentSent(lDocumentId, lWaitStatus, lApiError) then
     begin
       if Assigned(lWaitStatus) then
@@ -1431,73 +1492,50 @@ begin
         Memo3.Lines.Add('Outbox-Dokument ist noch nicht versandbereit oder fachlich beendet.');
         AppendStatusInfo(Memo3, 'Status', lWaitStatus);
       end;
-
       if Assigned(lApiError) then
-      begin
-        try
-          ShowApiError(lApiError);
-        finally
-          lApiError.Free;
-        end;
-      end;
+        ShowApiError(lApiError);
       Exit;
     end;
 
-  Memo3.Lines.Add('Outbox-Dokument ist im Status "sent".');
+    Memo3.Lines.Add('Outbox-Dokument ist im Status "sent".');
     AppendStatusInfo(Memo3, 'Status', lWaitStatus);
 
-    if lTIA.GetOutboxDocumentMetadata(lDocumentId, lMetadata, lApiError) then
-    try
-      Memo3.Lines.Add('');
-      Memo3.Lines.Add('Metadaten zum Originaldokument:');
-      AppendOutboxMetadata(Memo3, lMetadata);
-    finally
-      lMetadata.Free;
-    end
-    else
+    FreeAndNil(lApiError);
+    if not lTIA.GetOutboxDocumentMetadata(lDocumentId, lMetadata, lApiError) then
     begin
-      try
-        ShowApiError(lApiError);
-      finally
-        lApiError.Free;
-      end;
+      ShowApiError(lApiError);
       Exit;
     end;
-  finally
-    Screen.Cursor := crDefault;
-  end;
+    Memo3.Lines.Add('');
+    Memo3.Lines.Add('Metadaten zum Originaldokument:');
+    AppendOutboxMetadata(Memo3, lMetadata);
 
-  if lTIA.DownloadOutboxDocument(lDocumentId, lApiResult, lPendingStatus, lApiError) then
-  try
-    if Assigned(lPendingStatus) then
+    FreeAndNil(lApiError);
+    if not lTIA.DownloadOutboxDocument(lDocumentId, lApiResult, lPendingStatus, lApiError) then
     begin
-      Memo3.Lines.Add('');
-      Memo3.Lines.Add('Download noch nicht freigegeben:');
-      AppendStatusInfo(Memo3, 'Pending', lPendingStatus);
+      // HTTP 202 liefert False und einen Pending-Status, keinen Download.
+      if Assigned(lPendingStatus) then
+      begin
+        Memo3.Lines.Add('');
+        Memo3.Lines.Add('Download noch nicht freigegeben:');
+        AppendStatusInfo(Memo3, 'Pending', lPendingStatus);
+      end;
+      if Assigned(lApiError) then
+        ShowApiError(lApiError);
+      Exit;
     end;
-
     if Assigned(lApiResult) then
     begin
       Memo3.Lines.Add('');
       OpenFirstZipEntry(lApiResult, Memo3, EdgeBrowser2);
     end;
   finally
-    if Assigned(lPendingStatus) then
-      lPendingStatus.Free;
-    if Assigned(lApiResult) then
-      lApiResult.Free;
-    if Assigned(lWaitStatus) then
-      lWaitStatus.Free;
-  end
-  else
-  begin
-    try
-      ShowApiError(lApiError);
-    finally
-      lApiError.Free;
-      if Assigned(lWaitStatus) then
-        lWaitStatus.Free;
-    end;
+    lMetadata.Free;
+    lApiError.Free;
+    lPendingStatus.Free;
+    lApiResult.Free;
+    lWaitStatus.Free;
+    Screen.Cursor := crDefault;
   end;
 end;
 
@@ -1616,8 +1654,6 @@ var
   LPdfStream: TMemoryStream;
   LProgressForm: TForm;
   LProgressLabel: TLabel;
-  LStartedAt: UInt64;
-  LPollIntervalMs: Cardinal;
   LPollCount: Integer;
   LResultText: string;
 
@@ -1629,19 +1665,6 @@ var
       LProgressLabel.Update;
     end;
     Application.ProcessMessages;
-  end;
-
-  procedure WaitWithUi(const AIntervalMs: Cardinal);
-  var
-    LWaitedMs: Cardinal;
-  begin
-    LWaitedMs := 0;
-    while LWaitedMs < AIntervalMs do
-    begin
-      TThread.Sleep(100);
-      Inc(LWaitedMs, 100);
-      Application.ProcessMessages;
-    end;
   end;
 
   function BuildStatusText(const AStatus: TTraffiqxInboxDocumentStatusInfo): string;
@@ -1768,38 +1791,30 @@ begin
     UpdateProgress('Upload angenommen. Dokument-ID: ' + LUploadResult.DocumentId
       + sLineBreak + 'Status wird abgefragt...');
 
-    LStartedAt := TThread.GetTickCount64;
-    LPollIntervalMs := 2000;
     LPollCount := 0;
-    while True do
+    // Dieses Sample wartet der Einfachheit halber im Hauptthread. In VCL-
+    // Anwendungen im Worker warten; UI-Aenderungen ueber TThread.Queue zustellen.
+    if not LTIA.WaitForOutboxDocumentSent(LUploadResult.DocumentId, LStatus, LApiError,
+      8000, 8000, 60000,
+      procedure(const AStatus: TTraffiqxInboxDocumentStatusInfo; AElapsedMs: Cardinal)
+      begin
+        Inc(LPollCount);
+        // Verschachtelte Prozeduren lassen sich nicht erfassen: Anzeige hier direkt
+        if Assigned(LProgressLabel) then
+        begin
+          LProgressLabel.Caption := 'Statusabfrage ' + LPollCount.ToString + ' nach '
+            + IntToStr(AElapsedMs div 1000) + ' s: '
+            + TTraffiqxDocumentStatusHelper.ToDisplayString(AStatus.ParsedStatus)
+            + sLineBreak + 'Dokument-ID: ' + LUploadResult.DocumentId;
+          LProgressLabel.Update;
+        end;
+        Application.ProcessMessages;
+      end) then
     begin
-      Inc(LPollCount);
-      FreeAndNil(LStatus);
-      FreeAndNil(LApiError);
-
-      if not LTIA.GetOutboxDocumentStatus(LUploadResult.DocumentId, LStatus, LApiError) then
-      begin
-        ShowApiError(LApiError);
-        Exit;
-      end;
-
-      UpdateProgress('Statusabfrage ' + LPollCount.ToString + ': '
-        + TTraffiqxDocumentStatusHelper.ToDisplayString(LStatus.ParsedStatus)
-        + sLineBreak + 'Dokument-ID: ' + LUploadResult.DocumentId);
-
-      if LStatus.IsSuccessful or LStatus.HasProcessingError then
-        Break;
-
-      if (TThread.GetTickCount64 - LStartedAt) >= 180000 then
-      begin
-        LResultText := 'Timeout beim Warten auf den finalen Outbox-Status.' + sLineBreak
-          + BuildStatusText(LStatus);
-        MessageDlg(LResultText, mtWarning, [mbOK], 0);
-        Exit;
-      end;
-
-      WaitWithUi(LPollIntervalMs);
-      LPollIntervalMs := Min(LPollIntervalMs * 2, 8000);
+      ShowApiError(LApiError);
+      if Assigned(LStatus) then
+        MessageDlg(BuildStatusText(LStatus), mtWarning, [mbOK], 0);
+      Exit;
     end;
 
     LResultText := 'Testfall: ' + LScenario + ' / ' + LRoute + ' / ' + LDocumentType + sLineBreak

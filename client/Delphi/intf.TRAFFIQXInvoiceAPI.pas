@@ -33,6 +33,23 @@ uses
   ;
 
 type
+  // Ausschliesslich strukturierte OAuth-Fehler, niemals die rohe Token-Antwort.
+  ETraffiqxTokenError = class(Exception)
+  private
+    FHttpStatus: Integer;
+    FErrorCode: string;
+    FErrorDescription: string;
+    FIsInvalidGrant: Boolean;
+  public
+    constructor Create(AHttpStatus: Integer; const AErrorCode, AErrorDescription: string);
+    class function FromResponse(AHttpStatus: Integer; const AResponseText: string): ETraffiqxTokenError; static;
+    property HttpStatus: Integer read FHttpStatus;
+    property ErrorCode: string read FErrorCode;
+    property ErrorDescription: string read FErrorDescription;
+    // Vor Schwaerzung/Kuerzung erkannt; ErrorCode bleibt der OAuth-Code.
+    property IsInvalidGrant: Boolean read FIsInvalidGrant;
+  end;
+
   TTraffiqxProviderType = (
     tpNotSet,
     tpB4Value,
@@ -355,6 +372,11 @@ const
 function TraffiqxNormalizeId(const AValue: string): string;
 
 type
+  // Nur waehrend des synchronen Aufrufs gueltig: Status weder aendern noch
+  // freigeben/aufbewahren. Das abschliessende AStatus gehoert dem Aufrufer.
+  TTraffiqxOutboxProgress = reference to procedure(
+    const AStatus: TTraffiqxInboxDocumentStatusInfo; AElapsedMs: Cardinal);
+
   TTRAFFIQXInvoiceAPI = class;
 
   TTraffiqxPollCompletedEvent = reference to procedure(const AResult: TTraffiqxPollResult; _Sender : TTRAFFIQXInvoiceAPI);
@@ -493,6 +515,9 @@ type
     // Maskiert geheime Parameter in URLs und Header-Werten (Token, code,
     // sessionId, state ...): name=*** .
     class function RedactUrl(const AText: string): string; static;
+    // JSON strukturell maskieren, Freitext nur bei geheimen Schluesseln oder
+    // Bearer/Basic. Diagnosecodes, GUIDs und Hilfe-URLs bleiben erhalten.
+    class function RedactTokenLike(const AText: string): string; static;
   public
     constructor Create;
     destructor Destroy; override;
@@ -547,10 +572,13 @@ type
 
     // Wartet auf den fachlichen Zielstatus "sent". Standard: fester Abstand
     // von 8 Sekunden, hoechstens 1 Minute (Vorgabe aus der DATEV-Abnahme).
+    // AProgress laeuft synchron nach jeder erfolgreichen Statusabfrage, auch
+    // bei Endstatus. AStatus/AError sind auch bei False/Exception freizugeben.
     function WaitForOutboxDocumentSent(const ADocumentId: string;
       out AStatus: TTraffiqxInboxDocumentStatusInfo; out AError: TTraffiqxError;
       const AInitialIntervalMs: Cardinal = 8000; const AMaxIntervalMs: Cardinal = 8000;
-      const ATimeoutMs: Cardinal = 60000): Boolean;
+      const ATimeoutMs: Cardinal = 60000;
+      const AProgress: TTraffiqxOutboxProgress = nil): Boolean;
 
     function DownloadOutboxDocument(const ADocumentId: string;
       out AContent: TMemoryStream; out APendingStatus: TTraffiqxInboxDocumentStatusInfo; out AError: TTraffiqxError): Boolean;
@@ -587,6 +615,72 @@ type
   end;
 
 implementation
+
+constructor ETraffiqxTokenError.Create(AHttpStatus: Integer;
+  const AErrorCode, AErrorDescription: string);
+var
+  LMessage: string;
+begin
+  FHttpStatus := AHttpStatus;
+  FIsInvalidGrant := SameText(AErrorCode, 'invalid_grant')
+    or ((AErrorCode = '') and ContainsText(AErrorDescription, 'invalid_grant'));
+  // OAuth-Codes sind Bezeichner; keine beliebigen Antwortfelder anzeigen.
+  if (Length(AErrorCode) <= 64)
+    and TRegEx.IsMatch(AErrorCode, '^[A-Za-z0-9_.-]+$') then
+    FErrorCode := AErrorCode;
+  // Vor dem Kuerzen schwaerzen, sonst koennten Tokenreste sichtbar bleiben.
+  FErrorDescription := Copy(Trim(StringReplace(StringReplace(
+    TTRAFFIQXInvoiceAPI.RedactTokenLike(AErrorDescription),
+    #13, ' ', [rfReplaceAll]), #10, ' ', [rfReplaceAll])), 1, 300);
+  LMessage := 'Token-Endpunkt (HTTP ' + IntToStr(FHttpStatus) + ')';
+  if FErrorCode <> '' then
+    LMessage := LMessage + ': ' + FErrorCode;
+  if FErrorDescription <> '' then
+    LMessage := LMessage + ': ' + FErrorDescription
+  else if FErrorCode = '' then
+    LMessage := LMessage + ': Antwort nicht lesbar';
+  inherited Create(LMessage);
+end;
+
+class function ETraffiqxTokenError.FromResponse(AHttpStatus: Integer;
+  const AResponseText: string): ETraffiqxTokenError;
+var
+  LValue, LError: TJSONValue;
+  LCode, LDescription: string;
+  LIsInvalidGrant: Boolean;
+begin
+  LCode := '';
+  LDescription := '';
+  LValue := nil;
+  try
+    LValue := TJSONObject.ParseJSONValue(AResponseText);
+  except
+    LDescription := 'Antwort nicht lesbar';
+  end;
+  try
+    if LValue is TJSONObject then
+    begin
+      LError := TJSONObject(LValue).Values['error'];
+      if LError is TJSONObject then
+        LError := TJSONObject(LError).Values['code'];
+      if (LError is TJSONString) or (LError is TJSONNumber) then
+        LCode := LError.Value;
+      if TJSONObject(LValue).Values['error_description'] is TJSONString then
+        LDescription := TJSONObject(LValue).Values['error_description'].Value;
+    end;
+    // Klassifikation am vollstaendigen, ungeschwaerzten Text, einschliesslich
+    // dekodierter JSON-Felder. Ein vorhandener anderer Code hat Vorrang.
+    LIsInvalidGrant := SameText(LCode, 'invalid_grant')
+      or ((LCode = '') and (ContainsText(LDescription, 'invalid_grant')
+        or ContainsText(AResponseText, 'invalid_grant')));
+    if (LCode = '') and LIsInvalidGrant then
+      LCode := 'invalid_grant';
+    Result := ETraffiqxTokenError.Create(AHttpStatus, LCode, LDescription);
+    Result.FIsInvalidGrant := LIsInvalidGrant;
+  finally
+    LValue.Free;
+  end;
+end;
 
 type
   TTraffiqxPollOwner = class(TInterfacedObject, ITraffiqxPollOwner)
@@ -843,8 +937,8 @@ begin
   Result.RefreshToken := '';
   Result.AccessTokenExpiresAt := 0;
   Result.RefreshTokenExpiresAt := 0;
-  Result.ErrorCode := ACode;
-  Result.ErrorDescription := ADescription;
+  Result.ErrorCode := TTRAFFIQXInvoiceAPI.RedactTokenLike(ACode);
+  Result.ErrorDescription := TTRAFFIQXInvoiceAPI.RedactTokenLike(ADescription);
 end;
 
 class function TTraffiqxPollResult.Cancelled: TTraffiqxPollResult;
@@ -2032,7 +2126,7 @@ begin
     except
       on E: Exception do
       begin
-        AError := MakeError('#TRANSPORT', 0, 'Userinfo: ' + E.Message);
+        AError := MakeError('#TRANSPORT', 0, 'Userinfo: ' + RedactTokenLike(E.Message));
         Exit;
       end;
     end;
@@ -2041,7 +2135,7 @@ begin
     if LResponse.StatusCode <> 200 then
     begin
       AError := MakeError('#HTTP' + LResponse.StatusCode.ToString, LResponse.StatusCode,
-        'Userinfo: ' + LResponseText);
+        'Userinfo: ' + RedactTokenLike(LResponseText));
       Exit;
     end;
 
@@ -2128,7 +2222,7 @@ begin
     except
       on E: Exception do
       begin
-        AError := MakeError('#TRANSPORT', 0, 'Introspection: ' + E.Message);
+        AError := MakeError('#TRANSPORT', 0, 'Introspection: ' + RedactTokenLike(E.Message));
         Exit;
       end;
     end;
@@ -2137,7 +2231,7 @@ begin
     if LResponse.StatusCode <> 200 then
     begin
       AError := MakeError('#HTTP' + LResponse.StatusCode.ToString, LResponse.StatusCode,
-        'Introspection: ' + LResponseText);
+        'Introspection: ' + RedactTokenLike(LResponseText));
       Exit;
     end;
 
@@ -2211,7 +2305,7 @@ var
     except
       on E: Exception do
       begin
-        AError := MakeError('#REVOCATION_TRANSPORT', 0, E.Message);
+        AError := MakeError('#REVOCATION_TRANSPORT', 0, RedactTokenLike(E.Message));
         Exit(False);
       end;
     end;
@@ -2220,7 +2314,7 @@ var
     begin
       LResponseText := LResponse.ContentAsString(TEncoding.UTF8);
       AError := MakeError('#REVOCATION_HTTP' + LResponse.StatusCode.ToString,
-        LResponse.StatusCode, LResponseText);
+        LResponse.StatusCode, RedactTokenLike(LResponseText));
       Exit(False);
     end;
   end;
@@ -2367,12 +2461,13 @@ const
   // Schluessel, deren Werte nie ins Protokoll duerfen. Verglichen wird nach
   // URL-Dekodierung ohne Gross-/Kleinschreibung, "_" und "-"
   // (access_token = accessToken = access%5Ftoken).
-  // "code" gilt immer als geheim: DATEV liefert Fehlercodes als "error_code".
-  TRACE_SECRET_KEYS: array[0..15] of string = (
+  // Im HTTP-Trace gilt "code" immer als geheim; Diagnosen nehmen Fehlercodes aus.
+  TRACE_SECRET_KEYS: array[0..22] of string = (
     'accesstoken', 'refreshtoken', 'idtoken', 'idtokenhint', 'token', 'code',
     'codeverifier', 'clientsecret', 'providerclientsecret', 'secret',
     'password', 'apikey', 'xapikey', 'sessionid', 'clientassertion',
-    'authorization');
+    'authorization', 'cookie', 'setcookie', 'devicecode', 'usercode',
+    'assertion', 'jwt', 'session');
   TRACE_BODY_DROPPED = '(Body nicht protokolliert: enthaelt moeglicherweise Tokens)';
 
 // AWithState: In URLs und Formularen ist auch "state" geheim (beim
@@ -2388,6 +2483,231 @@ begin
     if LKey = LSecret then
       Exit(True);
   Result := False;
+end;
+
+procedure TraceRedactJson(AValue: TJSONValue; APreserveContext: Boolean = False); forward;
+
+function RedactDiagnosticText(const AText: string): string;
+const
+  // PCRE, einstelliger Lookbehind; Delphi-Match-Indizes sind 1-basiert.
+  // Nur Praefixe suchen, Werte danach ohne Kopieren des Textrests lesen.
+  DIAGNOSTIC_JWT_PATTERN = '(?<![A-Za-z0-9_\-])eyJ[A-Za-z0-9_\-]{5,}\.[A-Za-z0-9_\-]{5,}\.[A-Za-z0-9_\-]*';
+  PREFIX_PATTERN = '(?<![A-Za-z0-9_%\-])(?:["'']?([A-Za-z0-9_%\-]+)(?:\\?["''])?\s*[:=]\s*|(?i:Bearer|Basic)\s+)';
+var
+  LBuilder: TStringBuilder;
+  LMatch, LNextMatch: TMatch;
+  LName, LQuote: string;
+  LPos, LStart, LEnd, LContent, N: Integer;
+
+  function IsDelimiter(AIndex: Integer): Boolean;
+  begin
+    Result := CharInSet(AText[AIndex], [#9, #10, #13, ' ', '&', ',', ';', '}', ']', '"', ''''])
+      or ((AText[AIndex] = '\') and (AIndex < N)
+        and CharInSet(AText[AIndex + 1], ['"', '''']));
+  end;
+
+  // Verschachtelte Geheimnisse komplett entfernen; Klammern in Strings
+  // zaehlen nicht. Unvollstaendige/inkonsistente Werte bis zum Ende verwerfen.
+  function StructuredEnd(AStart: Integer): Integer;
+  var
+    LClosers: TStack<Char>;
+    LStringQuote: string;
+    LSlashes: Integer;
+  begin
+    Result := AStart;
+    LStringQuote := '';
+    LClosers := TStack<Char>.Create;
+    try
+      while Result <= N do
+      begin
+        if LStringQuote <> '' then
+        begin
+          if (LStringQuote = '"') or (LStringQuote = '''') then
+          begin
+            if AText[Result] = '\' then
+              Inc(Result)
+            else if AText[Result] = LStringQuote[1] then
+              LStringQuote := '';
+          end
+          else if AText[Result] = '\' then
+          begin
+            LSlashes := 0;
+            while (Result <= N) and (AText[Result] = '\') do
+            begin
+              Inc(LSlashes);
+              Inc(Result);
+            end;
+            if (Result <= N) and (AText[Result] = LStringQuote[2])
+              and (LSlashes mod 4 = 1) then
+              LStringQuote := '';
+            Inc(Result);
+            Continue;
+          end;
+        end
+        else
+          case AText[Result] of
+            '"', '''': LStringQuote := AText[Result];
+            '\':
+              if (Result < N) and CharInSet(AText[Result + 1], ['"', '''']) then
+              begin
+                LStringQuote := Copy(AText, Result, 2);
+                Inc(Result);
+              end;
+            '{': LClosers.Push('}');
+            '[': LClosers.Push(']');
+            '}', ']':
+              begin
+                if AText[Result] <> LClosers.Pop then
+                  Exit(N + 1);
+                if LClosers.Count = 0 then
+                  Exit(Result + 1);
+              end;
+          end;
+        Inc(Result);
+      end;
+      Result := N + 1;
+    finally
+      LClosers.Free;
+    end;
+  end;
+
+begin
+  N := Length(AText);
+  LBuilder := TStringBuilder.Create;
+  try
+    LPos := 1;
+    // Matches baut in der RTL eine Liste in festen 100er-Schritten auf.
+    // NextMatch vermeidet diese wachsende Liste bei grossen Antworttexten.
+    LNextMatch := TRegEx.Match(AText, PREFIX_PATTERN);
+    while LNextMatch.Success do
+    begin
+      LMatch := LNextMatch;
+      LNextMatch := LMatch.NextMatch;
+      if LMatch.Index < LPos then
+        Continue;
+      // PCRE meldet bei der Bearer/Basic-Alternative keine Gruppe 1.
+      LName := '';
+      if LMatch.Groups.Count > 1 then
+        LName := LMatch.Groups[1].Value;
+      if LName <> '' then
+      begin
+        try
+          LName := TNetEncoding.URL.Decode(LName);
+        except
+        end;
+        if not TraceIsSecretKey(LName, True) then
+          Continue;
+      end;
+      LStart := LMatch.Index + LMatch.Length;
+      if LStart > N then
+        Continue;
+      LEnd := LStart;
+      // Authorization: Bearer x / Basic x umfasst auch das Schema.
+      if SameText(Copy(AText, LEnd, 7), 'Bearer ') then
+        Inc(LEnd, 7)
+      else if SameText(Copy(AText, LEnd, 6), 'Basic ') then
+        Inc(LEnd, 6)
+      else if SameText(Copy(AText, LEnd, 7), 'Bearer' + #9) then
+        Inc(LEnd, 7)
+      else if SameText(Copy(AText, LEnd, 6), 'Basic' + #9) then
+        Inc(LEnd, 6);
+      while (LEnd <= N) and CharInSet(AText[LEnd], [' ', #9]) do
+        Inc(LEnd);
+      LQuote := '';
+      if (LEnd < N) and (AText[LEnd] = '\')
+        and CharInSet(AText[LEnd + 1], ['"', '''']) then
+      begin
+        LQuote := Copy(AText, LEnd, 2);
+        Inc(LEnd, 2);
+      end
+      else if (LEnd <= N) and CharInSet(AText[LEnd], ['"', '''']) then
+      begin
+        LQuote := AText[LEnd];
+        Inc(LEnd);
+      end;
+      LContent := LEnd;
+      // Wiederholte Schwaerzung (z.B. MakeError) muss idempotent bleiben.
+      if (LQuote = '') and (Copy(AText, LEnd, 5) = '[...]') then
+      begin
+        Inc(LEnd, 5);
+        if (LEnd > N) or IsDelimiter(LEnd) then
+          Continue;
+      end;
+      if (LQuote = '') and (LEnd <= N) and CharInSet(AText[LEnd], ['{', '[']) then
+        LEnd := StructuredEnd(LEnd)
+      else if LQuote <> '' then
+      begin
+        while LEnd <= N do
+        begin
+          if Copy(AText, LEnd, Length(LQuote)) = LQuote then
+            Break;
+          if (LEnd < N) and (AText[LEnd] = '\') then
+            Inc(LEnd);
+          Inc(LEnd);
+        end;
+      end
+      else
+      begin
+        while (LEnd <= N) and not IsDelimiter(LEnd) do
+          Inc(LEnd);
+      end;
+      // DATEV-Diagnosecodes sind keine OAuth-Authorization-Codes. Nur den
+      // vollstaendigen #TIA-Zifferncode ausnehmen, keine beliebigen #Werte.
+      if SameText(LName, 'code') and TRegEx.IsMatch(
+        Copy(AText, LContent, LEnd - LContent), '^#TIA[0-9]+[.,;:!?)\]}]*$') then
+        Continue;
+      if LQuote <> '' then
+        if LEnd <= N then
+          Inc(LEnd, Length(LQuote));
+      if LEnd = LStart then
+        Continue;
+      LBuilder.Append(AText, LPos - 1, LStart - LPos);
+      LBuilder.Append(LQuote);
+      LBuilder.Append('[...]');
+      LBuilder.Append(LQuote);
+      LPos := LEnd;
+    end;
+    LBuilder.Append(AText, LPos - 1, N - LPos + 1);
+    Result := LBuilder.ToString;
+  finally
+    LBuilder.Free;
+  end;
+  // JWTs sind auch ohne Schluessel erkennbar; opake Werte dagegen nicht.
+  Result := TRegEx.Replace(Result, DIAGNOSTIC_JWT_PATTERN, '[...]');
+end;
+
+class function TTRAFFIQXInvoiceAPI.RedactTokenLike(const AText: string): string;
+var
+  LJson, LRedacted: TJSONValue;
+begin
+  LJson := nil;
+  try
+    LJson := TJSONValue.ParseJSONValue(AText);
+  except
+    LJson := nil;
+  end;
+  if LJson = nil then
+    Exit(RedactDiagnosticText(AText));
+  try
+    // Auch JSON-Strings auf oberster Ebene erst dekodieren und anschliessend
+    // wieder als JSON ausgeben. So umgehen \u und \" die Pruefung nicht.
+    if LJson is TJSONString then
+    begin
+      LRedacted := TJSONString.Create(RedactDiagnosticText(LJson.Value));
+      try
+        Result := LRedacted.ToJSON;
+      finally
+        LRedacted.Free;
+      end;
+    end
+    else
+    begin
+      TraceRedactJson(LJson, True);
+      Result := LJson.ToJSON;
+    end;
+  finally
+    LJson.Free;
+  end;
 end;
 
 // Freitext wird nicht maskiert, sondern nur geprueft: Folgt auf irgendein
@@ -2598,8 +2918,9 @@ end;
 // Maskiert JSON strukturell: Werte geheimer Schluessel (jeden Typs) werden
 // "***"; jeder andere Stringwert wird als Freitext geprueft und notfalls
 // ganz durch "***" ersetzt (etwa eine Callback-URL mit code= in
-// error_description).
-procedure TraceRedactJson(AValue: TJSONValue);
+// error_description). APreserveContext erhaelt fuer Fehlerdiagnosen den
+// Freitext-Kontext; das HTTP-Trace bleibt standardmaessig strikt.
+procedure TraceRedactJson(AValue: TJSONValue; APreserveContext: Boolean);
 
   function RedactString(AString: TJSONValue; out ANew: TJSONValue): Boolean;
   var
@@ -2608,7 +2929,9 @@ procedure TraceRedactJson(AValue: TJSONValue);
     ANew := nil;
     if not (AString is TJSONString) then
       Exit(False);
-    if not TraceRedactText(TJSONString(AString).Value, LText) then
+    if APreserveContext then
+      LText := RedactDiagnosticText(TJSONString(AString).Value)
+    else if not TraceRedactText(TJSONString(AString).Value, LText) then
       LText := '***';
     Result := LText <> TJSONString(AString).Value;
     if Result then
@@ -2626,12 +2949,19 @@ begin
   if AValue is TJSONObject then
   begin
     for LPair in TJSONObject(AValue) do
-      if TraceIsSecretKey(LPair.JsonString.Value, False) then
+      if APreserveContext and SameText(LPair.JsonString.Value, 'code')
+        and ((LPair.JsonValue is TJSONNumber)
+          or ((LPair.JsonValue is TJSONString)
+            and (TRegEx.IsMatch(LPair.JsonValue.Value, '^#TIA[0-9]+$')
+              or TRegEx.IsMatch(LPair.JsonValue.Value, '^[#A-Za-z0-9_.-]{1,40}$'))
+            and not TraceHasTokenShape(LPair.JsonValue.Value))) then
+        Continue
+      else if TraceIsSecretKey(LPair.JsonString.Value, False) then
         LPair.JsonValue := TJSONString.Create('***')
       else if RedactString(LPair.JsonValue, LNew) then
         LPair.JsonValue := LNew
       else
-        TraceRedactJson(LPair.JsonValue);
+        TraceRedactJson(LPair.JsonValue, APreserveContext);
   end
   else if AValue is TJSONArray then
   begin
@@ -2649,7 +2979,7 @@ begin
       else
       begin
         LItems[i] := LArray.Items[i];
-        TraceRedactJson(LItems[i]);
+        TraceRedactJson(LItems[i], APreserveContext);
       end;
     end;
     if LChanged then
@@ -3086,7 +3416,7 @@ begin
       // bereitstellen und den Grund nicht stillschweigend verschlucken.
       if (LResponse.StatusCode < 200) or (LResponse.StatusCode >= 400) then
       begin
-        FLastRawContentReceived := LResponse.ContentAsString(TEncoding.UTF8);
+        FLastRawContentReceived := RedactTokenLike(LResponse.ContentAsString(TEncoding.UTF8));
         raise Exception.Create('Broker /start fehlgeschlagen (HTTP '
           + LResponse.StatusCode.ToString + '): ' + FLastRawContentReceived);
       end;
@@ -3124,7 +3454,8 @@ begin
   except
     on E: Exception do
     begin
-      OutputDebugString(PChar('StartAuth failed: ' + E.Message));
+      FLastRawContentReceived := RedactTokenLike(E.Message);
+      OutputDebugString(PChar('StartAuth failed: ' + FLastRawContentReceived));
       Result := False;
     end;
   end;
@@ -3225,7 +3556,7 @@ begin
           if (LResponse.StatusCode < 200) or (LResponse.StatusCode >= 400) then
             Exit(TTraffiqxPollResult.Fail(
               'http_' + LResponse.StatusCode.ToString,
-              LResponse.ContentAsString(TEncoding.UTF8)));
+              'Broker-Polling fehlgeschlagen (HTTP ' + LResponse.StatusCode.ToString + ').'));
 
           LJsonValue := TJSONObject.ParseJSONValue(
             LResponse.ContentAsString(TEncoding.UTF8));
@@ -3409,6 +3740,8 @@ var
   Headers: TNetHeaders;
   Base64NoBreaks: TBase64Encoding;
   LResponseText: string;
+  LAccessToken, LRefreshToken: string;
+  LTokenError: ETraffiqxTokenError;
 
   function BuildFormBody: string;
   begin
@@ -3431,46 +3764,18 @@ var
         + '11 Stunden, mit offline_access 6 Monate, und sind Single-Use. Bitte die Anmeldung erneut durchführen.';
   end;
 
-  function BuildRefreshErrorMessage(const AResponseText: string): string;
-  var
-    LJsonValue: TJSONValue;
-    LJson: TJSONObject;
-    LErrorCode: string;
-    LErrorDescription: string;
+  function BuildRefreshErrorMessage: string;
   begin
-    Result := 'Fehler beim Abrufen des Access Tokens: ' + AResponseText;
-
-    LJsonValue := TJSONObject.ParseJSONValue(AResponseText);
-    try
-      if not (LJsonValue is TJSONObject) then
-        Exit;
-      LJson := TJSONObject(LJsonValue);
-
-      LErrorCode := '';
-      LErrorDescription := '';
-      LJson.TryGetValue<string>('error', LErrorCode);
-      LJson.TryGetValue<string>('error_description', LErrorDescription);
-
-      if SameText(LErrorCode, 'invalid_grant') then
-      begin
-        if (FRefreshTokenExpiresAt > 0) and (FRefreshTokenExpiresAt <= Now) then
-          Exit(BuildRefreshTokenExpiredMessage(FRefreshTokenExpiresAt));
-
-        if (FProviderType in [tpDatev,tpDatevSmartTransfer]) then
-        begin
-          Result := 'Das Refresh-Token ist laut DATEV nicht mehr gültig (`invalid_grant`). '
-            + 'Mögliche Ursachen sind: Ablauf der Laufzeit ab Anmeldung (11 Stunden, mit offline_access 6 Monate), '
-            + 'bereits erfolgte Verwendung des Single-Use-Refresh-Tokens oder ein inzwischen '
-            + 'ersetztes Refresh-Token. Bitte die Anmeldung erneut durchführen.';
-
-          if LErrorDescription <> '' then
-            Result := Result + ' Provider-Detail: ' + LErrorDescription;
-          Exit;
-        end;
-      end;
-    finally
-      LJsonValue.Free;
-    end;
+    if (FRefreshTokenExpiresAt > 0) and (FRefreshTokenExpiresAt <= Now) then
+      Exit(BuildRefreshTokenExpiredMessage(FRefreshTokenExpiresAt));
+    if FProviderType in [tpDatev, tpDatevSmartTransfer] then
+      Result := 'Das Refresh-Token ist laut DATEV nicht mehr gültig (`invalid_grant`). '
+        + 'Mögliche Ursachen sind: Ablauf der Laufzeit ab Anmeldung (11 Stunden, mit offline_access 6 Monate), '
+        + 'bereits erfolgte Verwendung des Single-Use-Refresh-Tokens oder ein inzwischen '
+        + 'ersetztes Refresh-Token. Bitte die Anmeldung erneut durchführen.'
+    else
+      Result := 'Das Refresh-Token ist nicht mehr gültig (invalid_grant). '
+        + 'Bitte die Anmeldung erneut durchführen.';
   end;
 begin
   Result := false;
@@ -3505,36 +3810,54 @@ begin
     // Überprüfe den HTTP-Statuscode
     if Response.StatusCode = 200 then
     begin
-      // Parse die JSON-Antwort
-      ResponseJSONValue := TJSONObject.ParseJSONValue(LResponseText);
-      if not (ResponseJSONValue is TJSONObject) then
-        raise Exception.Create('Antwort des Token-Endpoints konnte nicht als JSON gelesen werden: ' + LResponseText);
-      ResponseJSON := TJSONObject(ResponseJSONValue);
+      try
+        // Parse die JSON-Antwort
+        ResponseJSONValue := TJSONObject.ParseJSONValue(LResponseText);
+        if not (ResponseJSONValue is TJSONObject) then
+          raise ETraffiqxTokenError.Create(Response.StatusCode, '', 'Antwort nicht lesbar');
+        ResponseJSON := TJSONObject(ResponseJSONValue);
 
-      // Sicher auslesen
-      if ResponseJSON.TryGetValue<string>('access_token', FAccessToken)
-         and ResponseJSON.TryGetValue<string>('refresh_token', FRefreshToken) then
-      begin
-        var LExpiresIn: Integer := 0;
-        var LRefreshExpiresIn: Integer := 0;
-        ResponseJSON.TryGetValue<Integer>('expires_in', LExpiresIn);
-        ResponseJSON.TryGetValue<Integer>('refresh_expires_in', LRefreshExpiresIn);
-        if LExpiresIn > 0 then
-          FAccessTokenExpiresAt := IncSecond(Now, LExpiresIn)
+        // Sicher auslesen
+        if ResponseJSON.TryGetValue<string>('access_token', LAccessToken)
+           and ResponseJSON.TryGetValue<string>('refresh_token', LRefreshToken)
+           and (Trim(LAccessToken) <> '') and (Trim(LRefreshToken) <> '') then
+        begin
+          var LExpiresIn: Integer := 0;
+          var LRefreshExpiresIn: Integer := 0;
+          ResponseJSON.TryGetValue<Integer>('expires_in', LExpiresIn);
+          ResponseJSON.TryGetValue<Integer>('refresh_expires_in', LRefreshExpiresIn);
+          FAccessToken := LAccessToken;
+          FRefreshToken := LRefreshToken;
+          if LExpiresIn > 0 then
+            FAccessTokenExpiresAt := IncSecond(Now, LExpiresIn)
+          else
+            FAccessTokenExpiresAt := 0;
+          // Laut DATEV behaelt das neue Refresh-Token die urspruengliche Laufzeit
+          // seit der Anmeldung. Ohne refresh_expires_in bleibt das beim Login
+          // ermittelte Ablaufdatum deshalb unveraendert - auch ein unbekanntes
+          // (0): Anmeldezeitpunkt und gewaehrter Scope sind dann nicht bekannt,
+          // eine Schaetzung ab "jetzt" waere zu lang. Klaerung per Introspection.
+          if LRefreshExpiresIn > 0 then
+            FRefreshTokenExpiresAt := IncSecond(Now, LRefreshExpiresIn);
+          Result := True;
+        end
         else
-          FAccessTokenExpiresAt := 0;
-        // Laut DATEV behaelt das neue Refresh-Token die urspruengliche Laufzeit
-        // seit der Anmeldung. Ohne refresh_expires_in bleibt das beim Login
-        // ermittelte Ablaufdatum deshalb unveraendert - auch ein unbekanntes
-        // (0): Anmeldezeitpunkt und gewaehrter Scope sind dann nicht bekannt,
-        // eine Schaetzung ab "jetzt" waere zu lang. Klaerung per Introspection.
-        if LRefreshExpiresIn > 0 then
-          FRefreshTokenExpiresAt := IncSecond(Now, LRefreshExpiresIn);
-        Result := True;
+          raise ETraffiqxTokenError.Create(Response.StatusCode, '', 'Antwort nicht lesbar: Tokens fehlen');
+      except
+        on E: ETraffiqxTokenError do
+          raise;
+        else
+          // Auch Konvertierungsfehler duerfen keine Feldwerte preisgeben.
+          raise ETraffiqxTokenError.Create(Response.StatusCode, '', 'Antwort nicht lesbar');
       end;
     end
     else
-      raise Exception.Create(BuildRefreshErrorMessage(LResponseText));
+    begin
+      LTokenError := ETraffiqxTokenError.FromResponse(Response.StatusCode, LResponseText);
+      if LTokenError.IsInvalidGrant then
+        LTokenError.Message := BuildRefreshErrorMessage + ' ' + LTokenError.Message;
+      raise LTokenError;
+    end;
 
       //400 {"error":"invalid_grant","error_description":"Maximum allowed refresh token reuse exceeded"}
 
@@ -3893,14 +4216,16 @@ begin
 
     LJson := TJSONObject.ParseJSONValue(Response.ContentAsString(TEncoding.UTF8));
     try
-      if not (LJson is TJSONObject) then
+      if LJson is TJSONObject then
+        AResult := TTraffiqxUploadResult.FromJson(TJSONObject(LJson));
+      if (AResult = nil) or (Trim(AResult.DocumentId) = '') then
       begin
-        // Hochgeladen, aber ohne lesbare document_id: nicht als stiller Fehlschlag melden
-        AError := MakeError('#PARSE', Response.StatusCode, 'Upload angenommen (HTTP ' + Response.StatusCode.ToString + '), aber die Antwort enthaelt keine lesbare document_id. Nicht erneut senden, sondern den Status in der Plattform pruefen. Antwort: ' + Copy(Response.ContentAsString(TEncoding.UTF8), 1, 500));
+        FreeAndNil(AResult);
+        // Hochgeladen, aber ohne lesbare document_id: nicht erneut senden.
+        AError := MakeError('#PARSE', Response.StatusCode, 'Upload angenommen (HTTP ' + Response.StatusCode.ToString + '), aber die Antwort enthaelt keine lesbare document_id. Nicht erneut senden, sondern den Status in der Plattform pruefen. Antwort: ' + Copy(RedactTokenLike(Response.ContentAsString(TEncoding.UTF8)), 1, 500));
         Exit;
       end;
-      AResult := TTraffiqxUploadResult.FromJson(TJSONObject(LJson));
-      Result := AResult <> nil;
+      Result := True;
     finally
       LJson.Free;
     end;
@@ -3957,14 +4282,16 @@ begin
 
     LJson := TJSONObject.ParseJSONValue(Response.ContentAsString(TEncoding.UTF8));
     try
-      if not (LJson is TJSONObject) then
+      if LJson is TJSONObject then
+        AResult := TTraffiqxUploadResult.FromJson(TJSONObject(LJson));
+      if (AResult = nil) or (Trim(AResult.DocumentId) = '') then
       begin
-        // Hochgeladen, aber ohne lesbare document_id: nicht als stiller Fehlschlag melden
-        AError := MakeError('#PARSE', Response.StatusCode, 'Upload angenommen (HTTP ' + Response.StatusCode.ToString + '), aber die Antwort enthaelt keine lesbare document_id. Nicht erneut senden, sondern den Status in der Plattform pruefen. Antwort: ' + Copy(Response.ContentAsString(TEncoding.UTF8), 1, 500));
+        FreeAndNil(AResult);
+        // Hochgeladen, aber ohne lesbare document_id: nicht erneut senden.
+        AError := MakeError('#PARSE', Response.StatusCode, 'Upload angenommen (HTTP ' + Response.StatusCode.ToString + '), aber die Antwort enthaelt keine lesbare document_id. Nicht erneut senden, sondern den Status in der Plattform pruefen. Antwort: ' + Copy(RedactTokenLike(Response.ContentAsString(TEncoding.UTF8)), 1, 500));
         Exit;
       end;
-      AResult := TTraffiqxUploadResult.FromJson(TJSONObject(LJson));
-      Result := AResult <> nil;
+      Result := True;
     finally
       LJson.Free;
     end;
@@ -4142,12 +4469,14 @@ end;
 
 function TTRAFFIQXInvoiceAPI.WaitForOutboxDocumentSent(const ADocumentId: string;
   out AStatus: TTraffiqxInboxDocumentStatusInfo; out AError: TTraffiqxError;
-  const AInitialIntervalMs, AMaxIntervalMs, ATimeoutMs: Cardinal): Boolean;
+  const AInitialIntervalMs, AMaxIntervalMs, ATimeoutMs: Cardinal;
+  const AProgress: TTraffiqxOutboxProgress): Boolean;
 var
   LCurrentStatus: TTraffiqxInboxDocumentStatusInfo;
   LCurrentError: TTraffiqxError;
   LPollIntervalMs: Cardinal;
   LStartedAt: UInt64;
+  LElapsedMs: UInt64;
 
   function BuildTerminalStatusError: TTraffiqxError;
   var
@@ -4176,16 +4505,35 @@ begin
   LStartedAt := TThread.GetTickCount64;
   while True do
   begin
+    // Auch nach Sleep/Callback pruefen: keine neue Abfrage ab der Zeitgrenze.
+    LElapsedMs := TThread.GetTickCount64 - LStartedAt;
+    if (ATimeoutMs > 0) and (LElapsedMs >= ATimeoutMs) then
+      Break;
+
     LCurrentStatus := nil;
     LCurrentError := nil;
-    if not GetOutboxDocumentStatus(ADocumentId, LCurrentStatus, LCurrentError) then
-    begin
-      AError := LCurrentError;
-      Exit(False);
+    try
+      if not GetOutboxDocumentStatus(ADocumentId, LCurrentStatus, LCurrentError) then
+      begin
+        AError := LCurrentError;
+        LCurrentError := nil;
+        Exit(False);
+      end;
+      FreeAndNil(AStatus);
+      AStatus := LCurrentStatus;
+      LCurrentStatus := nil;
+    finally
+      LCurrentStatus.Free;
+      LCurrentError.Free;
     end;
 
-    FreeAndNil(AStatus);
-    AStatus := LCurrentStatus;
+    if Assigned(AProgress) then
+    begin
+      LElapsedMs := TThread.GetTickCount64 - LStartedAt;
+      if LElapsedMs > High(Cardinal) then
+        LElapsedMs := High(Cardinal);
+      AProgress(AStatus, Cardinal(LElapsedMs));
+    end;
 
     if AStatus.IsSuccessful then
       Exit(True);
@@ -4196,19 +4544,24 @@ begin
       Exit(False);
     end;
 
-    if (ATimeoutMs > 0) and ((TThread.GetTickCount64 - LStartedAt) >= ATimeoutMs) then
-    begin
-      AError := MakeError('#TIMEOUT', 0,
-        'Timeout beim Warten auf den Outbox-Status "sent". Letzter Status: '
-        + TTraffiqxDocumentStatusHelper.ToDisplayString(AStatus.ParsedStatus)
-        + ' (' + AStatus.Status + ')');
-      Exit(False);
-    end;
-
+    LElapsedMs := TThread.GetTickCount64 - LStartedAt;
+    // Kein verkuerztes letztes Intervall und keine Abfrage nach Fristablauf.
+    if (ATimeoutMs > 0) and (LElapsedMs + LPollIntervalMs >= ATimeoutMs) then
+      Break;
     TThread.Sleep(LPollIntervalMs);
     if (AMaxIntervalMs > 0) and (LPollIntervalMs < AMaxIntervalMs) then
-      LPollIntervalMs := Min(LPollIntervalMs * 2, AMaxIntervalMs);
+    begin
+      if LPollIntervalMs > AMaxIntervalMs div 2 then
+        LPollIntervalMs := AMaxIntervalMs
+      else
+        LPollIntervalMs := LPollIntervalMs * 2;
+    end;
   end;
+  AError := MakeError('#TIMEOUT', 0, 'Timeout beim Warten auf den Outbox-Status "sent".');
+  if AStatus <> nil then
+    AError.Detail := AError.Detail + ' Letzter Status: '
+      + TTraffiqxDocumentStatusHelper.ToDisplayString(AStatus.ParsedStatus)
+      + ' (' + AStatus.Status + ')';
 end;
 
 function TTRAFFIQXInvoiceAPI.DownloadOutboxDocument(const ADocumentId: string;
