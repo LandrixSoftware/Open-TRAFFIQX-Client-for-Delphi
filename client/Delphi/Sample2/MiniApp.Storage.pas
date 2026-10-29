@@ -23,6 +23,9 @@ unit MiniApp.Storage;
 
 interface
 
+uses
+  System.SysUtils, MiniApp.Model;
+
 type
   TMiniAppClientConfig = record
     SourceFile: string;
@@ -33,6 +36,15 @@ type
     AppDisplayName: string;
     OAuth2BrokerCallbackUri: string;
     OAuth2BrokerApiKey: string;
+    XRechnungDistributionDir: string;
+  end;
+
+  TMiniAppInvoiceInfo = record
+    InvoiceNumber: string;
+    CustomerName: string;
+    IssueDate: string;
+    GrossAmount: Currency;
+    DeliveryChannel: string;
   end;
 
 function DataDirectory: string;
@@ -48,11 +60,18 @@ function PlaceholderPdfPath: string;
 procedure EnsureDataDirectories;
 procedure AtomicWriteText(const APath, AText: string);
 function LoadClientConfig: TMiniAppClientConfig;
+// Reservierung erfolgt vor allen Erzeugungsschritten. Auch bei einer Exception
+// enthält AReservedInvoiceNumber die dauerhaft verbrauchte Nummer (E4).
+function CreateOutboxInvoice(AData: TMiniAppData; const ACustomer: TMiniAppCustomer;
+  AIssueDate: TDate; out AReservedInvoiceNumber: string): string;
+function LoadInvoiceInfo(const AInvoiceNumber: string): TMiniAppInvoiceInfo;
+procedure LoadOutboxState(const AInvoiceNumber: string; out ADocumentID, AStatus: string);
 
 implementation
 
 uses
-  Winapi.Windows, System.SysUtils, System.Classes, System.IOUtils;
+  Winapi.Windows, System.Classes, System.IOUtils, System.JSON,
+  intf.Invoice, MiniApp.InvoiceBuilder;
 
 function DataDirectory: string;
 begin
@@ -213,8 +232,127 @@ begin
     Result.AppDisplayName := LEnv.Values['PROVIDER_TPDATEV_APP_NAME'];
     Result.OAuth2BrokerCallbackUri := LEnv.Values['OAUTH2_BROKER_CALLBACK_URI'];
     Result.OAuth2BrokerApiKey := LEnv.Values['OAUTH2_BROKER_API_KEY'];
+    Result.XRechnungDistributionDir := Trim(LEnv.Values['XRECHNUNG_DISTRIBUTION_DIR']);
+    if (Result.XRechnungDistributionDir <> '') and
+      not TPath.IsPathRooted(Result.XRechnungDistributionDir) then
+      Result.XRechnungDistributionDir := ExpandFileName(TPath.Combine(
+        ExtractFileDir(LPath), Result.XRechnungDistributionDir));
   finally
     LEnv.Free;
+  end;
+end;
+
+function CreateOutboxInvoice(AData: TMiniAppData; const ACustomer: TMiniAppCustomer;
+  AIssueDate: TDate; out AReservedInvoiceNumber: string): string;
+var
+  LInvoice: TInvoice;
+  LInfo: TJSONObject;
+  LPdf: string;
+begin
+  AReservedInvoiceNumber := '';
+  if AData = nil then
+    raise EArgumentNilException.Create('Stammdaten fehlen.');
+  AReservedInvoiceNumber := AData.NextInvoiceNumber;
+  Result := InvoiceDirectory(AReservedInvoiceNumber);
+  EnsureDirectory(OutgoingDirectory);
+  // CreateDirectory ist exklusiv: vorhandene Ordner niemals übernehmen.
+  if not Winapi.Windows.CreateDirectory(PChar(Result), nil) then
+    raise EInOutError.CreateFmt('Rechnungsordner kann nicht neu angelegt werden: %s (%s)',
+      [Result, SysErrorMessage(GetLastError)]);
+  // Bei Fehlern bleibt die Teilablage zur Diagnose erhalten. Keine Wiederverwendung.
+  LInvoice := BuildInvoice(AData, ACustomer, AReservedInvoiceNumber, AIssueDate);
+  try
+    LPdf := PlaceholderPdfPath;
+    if not FileExists(LPdf) then
+      raise EInOutError.Create('Belegbild-Platzhalter.pdf fehlt neben der EXE und im Sample2-Ordner.');
+    SaveInvoiceXml(LInvoice, TPath.Combine(Result, 'rechnung.xml'));
+    if not Winapi.Windows.CopyFile(PChar(LPdf), PChar(TPath.Combine(Result, 'belegbild.pdf')), True) then
+      RaiseLastOSError;
+    LInfo := TJSONObject.Create;
+    try
+      LInfo.AddPair('invoice_number', AReservedInvoiceNumber);
+      LInfo.AddPair('customer_number', ACustomer.CustomerNumber);
+      LInfo.AddPair('customer_name', ACustomer.Name);
+      LInfo.AddPair('issue_date', FormatDateTime('yyyy-mm-dd', LInvoice.InvoiceIssueDate));
+      LInfo.AddPair('gross_amount', TJSONNumber.Create(CurrToStr(
+        LInvoice.TaxInclusiveAmount, TFormatSettings.Invariant)));
+      LInfo.AddPair('delivery_channel', ACustomer.DeliveryChannel);
+      // Erst als letzten Schritt veröffentlichen: ohne Info ist die Ablage unvollständig.
+      AtomicWriteText(TPath.Combine(Result, 'rechnung.json'), LInfo.ToJSON);
+    finally
+      LInfo.Free;
+    end;
+  finally
+    LInvoice.Free;
+  end;
+end;
+
+function ReadJsonObject(const AFileName: string): TJSONObject;
+var
+  LValue: TJSONValue;
+begin
+  LValue := TJSONObject.ParseJSONValue(TFile.ReadAllText(AFileName, TEncoding.UTF8));
+  if not (LValue is TJSONObject) then
+  begin
+    LValue.Free;
+    raise EConvertError.Create('Ungültiges JSON-Objekt: ' + AFileName);
+  end;
+  Result := TJSONObject(LValue);
+end;
+
+function ReadJsonText(AObject: TJSONObject; const AKey: string;
+  AOptional: Boolean = False): string;
+var
+  LValue: TJSONValue;
+begin
+  LValue := AObject.GetValue(AKey);
+  if AOptional and (LValue = nil) then
+    Exit('');
+  if not (LValue is TJSONString) then
+    raise EConvertError.CreateFmt('Textfeld "%s" fehlt oder ist ungültig.', [AKey]);
+  Result := LValue.Value;
+end;
+
+function LoadInvoiceInfo(const AInvoiceNumber: string): TMiniAppInvoiceInfo;
+var
+  LInfo: TJSONObject;
+  LAmount: TJSONValue;
+begin
+  Result := Default(TMiniAppInvoiceInfo);
+  LInfo := ReadJsonObject(TPath.Combine(InvoiceDirectory(AInvoiceNumber), 'rechnung.json'));
+  try
+    Result.InvoiceNumber := ReadJsonText(LInfo, 'invoice_number');
+    if Result.InvoiceNumber <> AInvoiceNumber then
+      raise EConvertError.Create('Rechnungsnummer in rechnung.json stimmt nicht mit dem Ordner überein.');
+    Result.CustomerName := ReadJsonText(LInfo, 'customer_name');
+    Result.IssueDate := ReadJsonText(LInfo, 'issue_date');
+    Result.DeliveryChannel := ReadJsonText(LInfo, 'delivery_channel');
+    LAmount := LInfo.GetValue('gross_amount');
+    if not (LAmount is TJSONNumber) then
+      raise EConvertError.Create('Bruttobetrag in rechnung.json fehlt oder ist ungültig.');
+    if not TryStrToCurr(LAmount.Value, Result.GrossAmount, TFormatSettings.Invariant) then
+      raise EConvertError.Create('Bruttobetrag in rechnung.json liegt außerhalb des Wertebereichs.');
+  finally
+    LInfo.Free;
+  end;
+end;
+
+procedure LoadOutboxState(const AInvoiceNumber: string; out ADocumentID, AStatus: string);
+var
+  LPath: string;
+  LInfo: TJSONObject;
+begin
+  ADocumentID := '';
+  AStatus := '';
+  LPath := TPath.Combine(InvoiceDirectory(AInvoiceNumber), 'outbox.json');
+  if not FileExists(LPath) then
+    Exit;
+  LInfo := ReadJsonObject(LPath);
+  try
+    ADocumentID := ReadJsonText(LInfo, 'document_id', True);
+    AStatus := ReadJsonText(LInfo, 'status', True);
+  finally
+    LInfo.Free;
   end;
 end;
 

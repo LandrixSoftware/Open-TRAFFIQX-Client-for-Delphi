@@ -1,7 +1,7 @@
 ﻿object MiniAppMainForm: TMiniAppMainForm
   Left = 0
   Top = 0
-  Caption = 'TIA Mini-Anwendung – Stammdaten (S1)'
+  Caption = 'TIA Mini-Anwendung – Stammdaten und Ausgang (S1/S2)'
   ClientHeight = 820
   ClientWidth = 1040
   Constraints.MinHeight = 600
@@ -958,14 +958,122 @@
     end
     object OutgoingTab: TTabSheet
       Caption = 'Ausgang'
+      OnShow = OutgoingShow
       object OutgoingHint: TLabel
         Align = alTop
         AutoSize = False
         Height = 36
         Top = 0
-        Caption = 'folgt in Scheibe S4/S5'
+        Caption = 'Testrechnung als XRechnung mit Platzhalter-PDF. Versand und Originalablage folgen in S4/S5.'
         WordWrap = True
         Layout = tlCenter
+      end
+      object OutgoingCustomerPanel: TPanel
+        Align = alTop
+        Top = 36
+        Height = 40
+        BevelOuter = bvNone
+        TabOrder = 0
+        object OutgoingCustomerLabel: TLabel
+          Align = alLeft
+          AutoSize = False
+          Width = 72
+          Caption = 'Kunde:'
+          Layout = tlCenter
+          FocusControl = OutgoingCustomerCombo
+        end
+        object OutgoingCustomerCombo: TComboBox
+          Align = alClient
+          AlignWithMargins = True
+          Style = csDropDownList
+          TabOrder = 0
+        end
+      end
+      object OutgoingButtons: TFlowPanel
+        Align = alTop
+        Top = 76
+        Height = 76
+        AutoWrap = True
+        BevelOuter = bvNone
+        TabOrder = 1
+        object NewInvoiceButton: TButton
+          AlignWithMargins = True
+          Width = 170
+          Height = 30
+          Caption = 'Neue Testrechnung'
+          TabOrder = 0
+          OnClick = NewInvoiceClick
+        end
+        object ShowXmlButton: TButton
+          AlignWithMargins = True
+          Width = 115
+          Height = 30
+          Caption = 'XML anzeigen'
+          TabOrder = 1
+          OnClick = ShowXmlClick
+        end
+        object OpenFolderButton: TButton
+          AlignWithMargins = True
+          Width = 120
+          Height = 30
+          Caption = 'Ordner öffnen'
+          TabOrder = 2
+          OnClick = OpenFolderClick
+        end
+        object ValidateInvoiceButton: TButton
+          AlignWithMargins = True
+          Width = 145
+          Height = 30
+          Caption = 'Prüfen (KoSIT)'
+          Enabled = False
+          TabOrder = 3
+          OnClick = ValidateInvoiceClick
+        end
+        object RefreshOutgoingButton: TButton
+          AlignWithMargins = True
+          Width = 120
+          Height = 30
+          Caption = 'Aktualisieren'
+          TabOrder = 4
+          OnClick = OutgoingShow
+        end
+      end
+      object OutgoingList: TListView
+        Align = alClient
+        TabOrder = 2
+        ReadOnly = True
+        RowSelect = True
+        HideSelection = False
+        ViewStyle = vsReport
+        Columns = <
+          item
+            Caption = 'Nummer'
+            Width = 110
+          end
+          item
+            Caption = 'Kunde'
+            Width = 220
+          end
+          item
+            Caption = 'Datum'
+            Width = 100
+          end
+          item
+            Caption = 'Brutto'
+            Width = 110
+          end
+          item
+            Caption = 'Versandweg'
+            Width = 110
+          end
+          item
+            Caption = 'document_id'
+            Width = 180
+          end
+          item
+            Caption = 'Status'
+            Width = 110
+          end>
       end
     end
     object IncomingTab: TTabSheet

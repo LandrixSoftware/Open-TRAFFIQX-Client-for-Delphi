@@ -210,14 +210,14 @@ begin
   Seller.PostalCode := '00000';
   Seller.City := 'Musterstadt';
   Seller.CountryCode := 'DE';
-  Seller.VatID := 'DE000000000';
-  Seller.TaxNumber := '00/000/00000';
+  Seller.VatID := 'DE123456788'; // Dummywerte aus XRechnung-for-Delphi (gueltige Pruefziffern)
+  Seller.TaxNumber := '222/111/4444';
   Seller.ContactName := 'Testkontakt';
   Seller.Phone := '+49 000 000000';
   Seller.Email := 'kontakt@example.invalid';
   Seller.ElectronicAddress := 'rechnung@example.invalid';
-  Seller.IBAN := 'DE00000000000000000000';
-  Seller.BIC := 'TESTDE00XXX';
+  Seller.IBAN := 'DE75512108001245126199'; // nicht existierend, aber gueltig
+  Seller.BIC := '';
   Seller.BankName := 'Fiktive Testbank';
   FCustomers.Clear;
   LCustomer := Default(TMiniAppCustomer);
@@ -246,6 +246,14 @@ begin
   LCustomer.TraffiqxID := '0000000000000';
   LCustomer.ElectronicAddress := 'kunde3@example.invalid';
   LCustomer.ContactEmail := 'kunde3@example.invalid';
+  FCustomers.Add(LCustomer);
+  LCustomer.CustomerNumber := 'K-004';
+  LCustomer.Name := 'Beispielkunde Peppol';
+  LCustomer.DeliveryChannel := 'peppol';
+  LCustomer.TraffiqxID := '';
+  LCustomer.ElectronicAddress := 'DE123456788';
+  LCustomer.ElectronicAddressScheme := '9930';
+  LCustomer.ContactEmail := 'kunde4@example.invalid';
   FCustomers.Add(LCustomer);
   FPositions.Clear;
   LPosition := Default(TMiniAppPosition);

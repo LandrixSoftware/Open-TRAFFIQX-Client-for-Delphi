@@ -132,6 +132,16 @@ type
     PositionList: TListView;
     OutgoingTab: TTabSheet;
     OutgoingHint: TLabel;
+    OutgoingCustomerPanel: TPanel;
+    OutgoingCustomerLabel: TLabel;
+    OutgoingCustomerCombo: TComboBox;
+    OutgoingButtons: TFlowPanel;
+    NewInvoiceButton: TButton;
+    ShowXmlButton: TButton;
+    OpenFolderButton: TButton;
+    ValidateInvoiceButton: TButton;
+    RefreshOutgoingButton: TButton;
+    OutgoingList: TListView;
     IncomingTab: TTabSheet;
     IncomingHint: TLabel;
     ProtocolTab: TTabSheet;
@@ -152,6 +162,11 @@ type
     procedure PositionNewClick(Sender: TObject);
     procedure PositionDeleteClick(Sender: TObject);
     procedure PositionApplyClick(Sender: TObject);
+    procedure OutgoingShow(Sender: TObject);
+    procedure NewInvoiceClick(Sender: TObject);
+    procedure ShowXmlClick(Sender: TObject);
+    procedure OpenFolderClick(Sender: TObject);
+    procedure ValidateInvoiceClick(Sender: TObject);
   private
     FData: TMiniAppData;
     FClientConfig: TMiniAppClientConfig;
@@ -161,6 +176,7 @@ type
     FPositionDirty: Boolean;
     FCustomerIndex: Integer;
     FPositionIndex: Integer;
+    FOutgoingCustomerNumbers: TArray<string>;
     procedure MarkDirty;
     procedure ReadSeller;
     procedure ShowSeller;
@@ -173,6 +189,11 @@ type
     function ConfirmCustomerChange: Boolean;
     function ConfirmPositionChange: Boolean;
     function SaveData: Boolean;
+    procedure RefreshOutgoingCustomers;
+    procedure RefreshOutgoing;
+    function SelectedInvoiceNumber: string;
+    procedure OpenLocalPath(const APath: string);
+    procedure ValidationError(const AMessage: string);
   public
     destructor Destroy; override;
     // S1: Aufruf im Hauptthread; später Service-Callbacks per TThread.Queue.
@@ -185,7 +206,8 @@ var
 implementation
 
 uses
-  Vcl.Dialogs, System.UITypes;
+  Vcl.Dialogs, System.UITypes, System.IOUtils, Winapi.Windows, Winapi.ShellAPI,
+  intf.XRechnungValidationHelperJava;
 
 {$R *.dfm}
 
@@ -238,6 +260,8 @@ begin
     // Niemals Konfigurationswerte oder Zugangsdaten in das Protokoll übernehmen.
     Log('Client-Konfiguration konnte nicht gelesen werden. Bitte .env prüfen.', lkWarning);
   end;
+  ValidateInvoiceButton.Enabled := FClientConfig.XRechnungDistributionDir <> '';
+  OutgoingShow(nil);
 end;
 
 destructor TMiniAppMainForm.Destroy;
@@ -398,6 +422,7 @@ begin
   finally
     CustomerList.Items.EndUpdate;
   end;
+  RefreshOutgoingCustomers;
 end;
 
 procedure TMiniAppMainForm.ApplyCustomer;
@@ -753,6 +778,243 @@ end;
 procedure TMiniAppMainForm.SaveClick(Sender: TObject);
 begin
   SaveData;
+end;
+
+procedure TMiniAppMainForm.RefreshOutgoingCustomers;
+var
+  LNumber: string;
+  LCustomer: TMiniAppCustomer;
+  LIndex: Integer;
+begin
+  // Auswahl anhand der stabilen Kundennummer erhalten, auch nach Bearbeitungen.
+  LNumber := '';
+  LIndex := OutgoingCustomerCombo.ItemIndex;
+  if (LIndex >= 0) and (LIndex < Length(FOutgoingCustomerNumbers)) then
+    LNumber := FOutgoingCustomerNumbers[LIndex];
+  OutgoingCustomerCombo.Items.BeginUpdate;
+  try
+    OutgoingCustomerCombo.Clear;
+    SetLength(FOutgoingCustomerNumbers, FData.Customers.Count);
+    LIndex := -1;
+    for LCustomer in FData.Customers do
+    begin
+      OutgoingCustomerCombo.Items.Add(LCustomer.CustomerNumber + ' - ' + LCustomer.Name);
+      FOutgoingCustomerNumbers[OutgoingCustomerCombo.Items.Count - 1] := LCustomer.CustomerNumber;
+      if LCustomer.CustomerNumber = LNumber then
+        LIndex := OutgoingCustomerCombo.Items.Count - 1;
+    end;
+    if (LIndex < 0) and (OutgoingCustomerCombo.Items.Count > 0) then
+      LIndex := 0;
+    OutgoingCustomerCombo.ItemIndex := LIndex;
+    NewInvoiceButton.Enabled := LIndex >= 0;
+  finally
+    OutgoingCustomerCombo.Items.EndUpdate;
+  end;
+end;
+
+procedure TMiniAppMainForm.RefreshOutgoing;
+var
+  LDirectory, LNumber, LSelected, LDocumentID, LStatus: string;
+  LInfo: TMiniAppInvoiceInfo;
+  LItem: TListItem;
+begin
+  LSelected := '';
+  if OutgoingList.Selected <> nil then
+    LSelected := OutgoingList.Selected.Caption;
+  OutgoingList.Items.BeginUpdate;
+  try
+    OutgoingList.Clear;
+    for LDirectory in TDirectory.GetDirectories(OutgoingDirectory) do
+    begin
+      LNumber := ExtractFileName(LDirectory);
+      LItem := OutgoingList.Items.Add;
+      LItem.Caption := LNumber;
+      LItem.SubItems.Add('');
+      LItem.SubItems.Add('');
+      LItem.SubItems.Add('');
+      LItem.SubItems.Add('');
+      LItem.SubItems.Add('');
+      LItem.SubItems.Add('');
+      try
+        LInfo := LoadInvoiceInfo(LNumber);
+        LItem.SubItems[0] := LInfo.CustomerName;
+        LItem.SubItems[1] := LInfo.IssueDate;
+        LItem.SubItems[2] := FormatCurr('0.00', LInfo.GrossAmount) + ' EUR';
+        LItem.SubItems[3] := LInfo.DeliveryChannel;
+      except
+        on E: Exception do
+        begin
+          LItem.SubItems[0] := '(Ablage unvollständig / Info nicht lesbar)';
+          Log(LNumber + ': ' + E.Message, lkWarning);
+        end;
+      end;
+      try
+        LoadOutboxState(LNumber, LDocumentID, LStatus);
+        LItem.SubItems[4] := LDocumentID;
+        LItem.SubItems[5] := LStatus;
+      except
+        on E: Exception do
+          Log(LNumber + ': outbox.json nicht lesbar: ' + E.Message, lkWarning);
+      end;
+      if LNumber = LSelected then
+        LItem.Selected := True;
+    end;
+  finally
+    OutgoingList.Items.EndUpdate;
+  end;
+end;
+
+procedure TMiniAppMainForm.OutgoingShow(Sender: TObject);
+begin
+  if FData = nil then
+    Exit;
+  try
+    RefreshOutgoingCustomers;
+    RefreshOutgoing;
+  except
+    on E: Exception do
+      Log('Ausgang konnte nicht aktualisiert werden: ' + E.Message, lkError);
+  end;
+end;
+
+procedure TMiniAppMainForm.NewInvoiceClick(Sender: TObject);
+var
+  LNumber, LDirectory: string;
+  LCustomer: TMiniAppCustomer;
+  LItem: TListItem;
+  LCustomerIndex: Integer;
+begin
+  LCustomerIndex := OutgoingCustomerCombo.ItemIndex;
+  // Offene Editoren vor der Erzeugung übernehmen und Stammdaten persistieren.
+  if not SaveData then
+    Exit;
+  // SaveData ändert keine bestehenden Listenindizes. Bei einer Umbenennung
+  // der Kundennummer darf die Combo-Aktualisierung keinen anderen Empfänger wählen.
+  if LCustomerIndex < 0 then
+    LCustomerIndex := OutgoingCustomerCombo.ItemIndex;
+  if LCustomerIndex < 0 then
+    Exit;
+  OutgoingCustomerCombo.ItemIndex := LCustomerIndex;
+  LCustomer := FData.Customers[LCustomerIndex];
+  LNumber := '';
+  try
+    LDirectory := CreateOutboxInvoice(FData, LCustomer, Date, LNumber);
+    Log(LNumber + ' für ' + LCustomer.Name + ' erzeugt: ' + LDirectory);
+  except
+    on E: Exception do
+    begin
+      Log('Rechnungserzeugung fehlgeschlagen: ' + E.Message, lkError);
+      if LNumber <> '' then
+        Log('Rechnungsnummer ' + LNumber + ' bleibt verbraucht und wird nie wiederverwendet. ' +
+          'Eine eventuell vorhandene Teilablage bleibt zur Diagnose erhalten.', lkWarning);
+      MessageDlg(E.Message, mtError, [mbOK], 0);
+    end;
+  end;
+  InvoiceNumberLabel.Caption := 'Nächste Rechnungsnummer: ' + FData.PendingInvoiceNumber;
+  OutgoingShow(nil);
+  LItem := OutgoingList.FindCaption(0, LNumber, False, True, False);
+  if LItem <> nil then
+  begin
+    LItem.Selected := True;
+    LItem.MakeVisible(False);
+  end;
+end;
+
+function TMiniAppMainForm.SelectedInvoiceNumber: string;
+begin
+  if OutgoingList.Selected = nil then
+    raise EInvalidOperation.Create('Bitte zuerst eine Rechnung im Ausgang auswählen.');
+  Result := OutgoingList.Selected.Caption;
+end;
+
+procedure TMiniAppMainForm.OpenLocalPath(const APath: string);
+var
+  LResult: NativeInt;
+begin
+  if not FileExists(APath) and not DirectoryExists(APath) then
+    raise EInOutError.Create('Datei oder Ordner fehlt: ' + APath);
+  LResult := NativeInt(ShellExecute(Handle, 'open', PChar(APath), nil, nil, SW_SHOWNORMAL));
+  if LResult <= 32 then
+    raise EInOutError.CreateFmt('Das Standardprogramm konnte nicht geöffnet werden (Fehler %d).', [LResult]);
+end;
+
+procedure TMiniAppMainForm.ShowXmlClick(Sender: TObject);
+begin
+  try
+    OpenLocalPath(TPath.Combine(InvoiceDirectory(SelectedInvoiceNumber), 'rechnung.xml'));
+  except
+    on E: Exception do
+    begin
+      Log(E.Message, lkError);
+      MessageDlg(E.Message, mtError, [mbOK], 0);
+    end;
+  end;
+end;
+
+procedure TMiniAppMainForm.OpenFolderClick(Sender: TObject);
+begin
+  try
+    OpenLocalPath(InvoiceDirectory(SelectedInvoiceNumber));
+  except
+    on E: Exception do
+    begin
+      Log(E.Message, lkError);
+      MessageDlg(E.Message, mtError, [mbOK], 0);
+    end;
+  end;
+end;
+
+procedure TMiniAppMainForm.ValidationError(const AMessage: string);
+begin
+  Log('KoSIT: ' + AMessage, lkError);
+end;
+
+procedure TMiniAppMainForm.ValidateInvoiceClick(Sender: TObject);
+var
+  LDirectory, LDist, LOutput, LXml, LHtml: string;
+  LSuccess: Boolean;
+begin
+  if FClientConfig.XRechnungDistributionDir = '' then
+    Exit;
+  try
+    LDirectory := InvoiceDirectory(SelectedInvoiceNumber);
+    LDist := IncludeTrailingPathDelimiter(FClientConfig.XRechnungDistributionDir);
+    Screen.Cursor := crHourGlass;
+    try
+      Log('KoSIT-Prüfung gestartet: ' + SelectedInvoiceNumber);
+      // Lokaler, begrenzter Lauf ohne ProcessMessages (keine Wiedereintritte).
+      LSuccess := GetXRechnungValidationHelperJava
+        .SetJavaRuntimeEnvironmentPath(LDist + 'java')
+        .SetValidatorLibPath(LDist + 'validator')
+        .SetValidatorConfigurationPath(LDist + 'validator-configuration30x')
+        .SetValidationErrorHandler(ValidationError)
+        .SetExecTimeout(60)
+        .ValidateFile(TPath.Combine(LDirectory, 'rechnung.xml'), LOutput, LXml, LHtml);
+      if LOutput <> '' then
+        Log('KoSIT-Ausgabe: ' + sLineBreak + LOutput);
+      if LXml <> '' then
+      begin
+        AtomicWriteText(TPath.Combine(LDirectory, 'pruefbericht.xml'), LXml);
+        Log('KoSIT-Ergebnis: ' + sLineBreak + LXml);
+      end;
+      if LHtml <> '' then
+        AtomicWriteText(TPath.Combine(LDirectory, 'pruefbericht.html'), LHtml);
+      // Der Boolean meldet nur den Prozessstatus, nicht die fachliche Gültigkeit.
+      if LSuccess and (LXml <> '') then
+        Log('KoSIT beendet. Fachliches Ergebnis siehe Bericht und Protokoll; Ablage: ' + LDirectory)
+      else
+        Log('KoSIT nicht erfolgreich abgeschlossen oder kein Bericht erzeugt. ' +
+          'Distribution und Protokoll prüfen.', lkError);
+    finally
+      Screen.Cursor := crDefault;
+    end;
+  except
+    on E: Exception do
+    begin
+      Log('KoSIT-Prüfung fehlgeschlagen: ' + E.Message, lkError);
+      MessageDlg(E.Message, mtError, [mbOK], 0);
+    end;
+  end;
 end;
 
 procedure TMiniAppMainForm.FormCloseQuery(Sender: TObject; var CanClose: Boolean);

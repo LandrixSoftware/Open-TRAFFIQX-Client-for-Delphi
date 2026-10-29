@@ -139,6 +139,7 @@
         </DCCReference>
         <DCCReference Include="MiniApp.Model.pas" />
         <DCCReference Include="MiniApp.Storage.pas" />
+        <DCCReference Include="MiniApp.InvoiceBuilder.pas" />
     </ItemGroup>
     <ProjectExtensions>
         <Borland.Personality>Delphi.Personality.12</Borland.Personality>

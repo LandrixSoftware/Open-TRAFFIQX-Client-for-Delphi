@@ -25,7 +25,8 @@ uses
   Vcl.Forms,
   MiniApp.MainForm in 'MiniApp.MainForm.pas' {MiniAppMainForm},
   MiniApp.Model in 'MiniApp.Model.pas',
-  MiniApp.Storage in 'MiniApp.Storage.pas';
+  MiniApp.Storage in 'MiniApp.Storage.pas',
+  MiniApp.InvoiceBuilder in 'MiniApp.InvoiceBuilder.pas';
 
 // Wird beim IDE-/MSBuild-Projektbuild aus der .dproj erzeugt.
 {$R *.res}
