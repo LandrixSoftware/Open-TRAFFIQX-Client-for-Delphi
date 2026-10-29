@@ -376,6 +376,9 @@ type
   // Achtung: Das Polling der Anmeldung laeuft in einem Hintergrund-Thread und
   // ruft OnHttpTrace von dort auf; der Empfaenger muss threadsicher sein.
   // OnHttpTrace vor dem ersten Aufruf setzen und danach nicht mehr aendern.
+  // Polling kopiert den Handler: ein bereits gestarteter Trace-Aufruf kann
+  // CancelPolling/Free ueberleben. Der Empfaenger braucht eine davon unabhaengige
+  // Lebensdauer (z.B. der statische TTraffiqxHttpLog.Write).
   TTraffiqxHttpTraceKind = (htkRequest, htkResponse);
 
   TTraffiqxHttpTrace = record
@@ -399,6 +402,29 @@ type
   // (Statusabfrage).
   TTraffiqxTraceBody = (tbOnError, tbOnErrorOrPending, tbAlways);
 
+  // Gemeinsame Lebensdauersperre fuer alle Laeufe einer API. So bleibt auch
+  // ein Laufwechsel aus einem Callback gegen gleichzeitiges Free geschuetzt.
+  ITraffiqxPollOwner = interface
+    procedure Lock;
+    procedure Unlock;
+    function GetOwner: TTRAFFIQXInvoiceAPI;
+    procedure Detach;
+  end;
+
+  // Interner, referenzgezaehlter Zustand. Die Interface-Identitaet ist die
+  // Laufkennung; ein neuer Lauf verwendet niemals den alten Abbruchzustand.
+  ITraffiqxPollRun = interface
+    procedure Cancel;
+    procedure Detach;
+    function IsCancelled: Boolean;
+    function WaitCancelled(ATimeoutMs: Cardinal): Boolean;
+    procedure QueueResult(const AResult: TTraffiqxPollResult);
+    procedure Deliver(const AResult: TTraffiqxPollResult);
+    procedure EmitTrace(const AEntry: TTraffiqxHttpTrace);
+    procedure SetClearSession;
+    function ShouldClearSession: Boolean;
+  end;
+
   TTRAFFIQXInvoiceAPI = class(TObject)
   private
     FAccessToken: string;
@@ -419,7 +445,8 @@ type
     FApiBaseUri: String;
     FCurrentSessionId: String;
     FPollFuture: IFuture<TTraffiqxPollResult>;
-    FPollCancelFlag: Integer;
+    FPollRun: ITraffiqxPollRun;
+    FPollOwner: ITraffiqxPollOwner;
     FOnPollingCompleted: TTraffiqxPollCompletedEvent;
     FOnOpenAuthUrl: TTraffiqxOpenAuthUrlEvent;
     FOnHttpTrace: TTraffiqxHttpTraceEvent;
@@ -444,9 +471,13 @@ type
     function TraceExecute(AClient: TNetHTTPClient; const AMethod, AUrl: string;
       const AHeaders: TNetHeaders; ABody: TTraffiqxTraceBody;
       const ASend: TFunc<IHTTPResponse>): IHTTPResponse;
-    procedure FireHttpTrace(const ATrace: TTraffiqxHttpTraceEvent; const AEntry: TTraffiqxHttpTrace);
-    procedure FillTraceResponse(var AEntry: TTraffiqxHttpTrace; const AResponse: IHTTPResponse;
-      ABody: TTraffiqxTraceBody);
+    class function TraceExecuteWithTrace(const ATrace: TTraffiqxHttpTraceEvent;
+      AClient: TNetHTTPClient; const AMethod, AUrl: string;
+      const AHeaders: TNetHeaders; ABody: TTraffiqxTraceBody;
+      const ASend: TFunc<IHTTPResponse>): IHTTPResponse; static;
+    class procedure FireHttpTrace(const ATrace: TTraffiqxHttpTraceEvent; const AEntry: TTraffiqxHttpTrace); static;
+    class procedure FillTraceResponse(var AEntry: TTraffiqxHttpTrace; const AResponse: IHTTPResponse;
+      ABody: TTraffiqxTraceBody); static;
     function HttpGet(AClient: TNetHTTPClient; const AUrl: string; AContent: TStream;
       const AHeaders: TNetHeaders; ABody: TTraffiqxTraceBody): IHTTPResponse;
     function HttpPost(AClient: TNetHTTPClient; const AUrl: string; ASource: TStream;
@@ -468,6 +499,9 @@ type
     function TryFetchWellKnownEndpoints: Boolean;
     function SetProviderByConfigurationToken(const AJson: string): Boolean;
     function StartAuth : Boolean;
+    // Polling starten/abbrechen und Handler aendern nur im Hauptthread.
+    // Ergebnisse/Tokens werden dort asynchron zugestellt (Nachrichtenpumpe
+    // bzw. CheckSynchronize erforderlich). Free darf auch ausserhalb erfolgen.
     function BeginPolling(const AIntervalMs: Cardinal = 3000;
       const ATimeoutMs: Cardinal = 600000): IFuture<TTraffiqxPollResult>;
     procedure CancelPolling;
@@ -553,6 +587,213 @@ type
   end;
 
 implementation
+
+type
+  TTraffiqxPollOwner = class(TInterfacedObject, ITraffiqxPollOwner)
+  private
+    FOwner: TTRAFFIQXInvoiceAPI;
+  public
+    constructor Create(AOwner: TTRAFFIQXInvoiceAPI);
+    procedure Lock;
+    procedure Unlock;
+    function GetOwner: TTRAFFIQXInvoiceAPI;
+    procedure Detach;
+  end;
+
+  TTraffiqxPollRun = class(TInterfacedObject, ITraffiqxPollRun)
+  private
+    FOwner: ITraffiqxPollOwner;
+    FDetached: Boolean;
+    FSessionId: string;
+    FCancelEvent: TEvent;
+    FDelivered: Boolean;
+    FClearSession: Integer;
+    FTrace: TTraffiqxHttpTraceEvent;
+  public
+    constructor Create(const AOwner: ITraffiqxPollOwner; const ASessionId: string;
+      const ATrace: TTraffiqxHttpTraceEvent);
+    destructor Destroy; override;
+    procedure Cancel;
+    procedure Detach;
+    function IsCancelled: Boolean;
+    function WaitCancelled(ATimeoutMs: Cardinal): Boolean;
+    procedure QueueResult(const AResult: TTraffiqxPollResult);
+    procedure Deliver(const AResult: TTraffiqxPollResult);
+    procedure EmitTrace(const AEntry: TTraffiqxHttpTrace);
+    procedure SetClearSession;
+    function ShouldClearSession: Boolean;
+  end;
+
+constructor TTraffiqxPollOwner.Create(AOwner: TTRAFFIQXInvoiceAPI);
+begin
+  inherited Create;
+  FOwner := AOwner;
+end;
+
+procedure TTraffiqxPollOwner.Lock;
+begin
+  TMonitor.Enter(Self);
+end;
+
+procedure TTraffiqxPollOwner.Unlock;
+begin
+  TMonitor.Exit(Self);
+end;
+
+function TTraffiqxPollOwner.GetOwner: TTRAFFIQXInvoiceAPI;
+begin
+  // Nur innerhalb von Lock/Unlock aufrufen und verwenden.
+  Result := FOwner;
+end;
+
+procedure TTraffiqxPollOwner.Detach;
+begin
+  Lock;
+  try
+    FOwner := nil;
+  finally
+    Unlock;
+  end;
+end;
+
+constructor TTraffiqxPollRun.Create(const AOwner: ITraffiqxPollOwner;
+  const ASessionId: string; const ATrace: TTraffiqxHttpTraceEvent);
+begin
+  inherited Create;
+  FCancelEvent := TEvent.Create(nil, True, False, '');
+  FOwner := AOwner;
+  FSessionId := ASessionId;
+  FTrace := ATrace;
+end;
+
+destructor TTraffiqxPollRun.Destroy;
+begin
+  FCancelEvent.Free;
+  inherited;
+end;
+
+function TTraffiqxPollRun.IsCancelled: Boolean;
+begin
+  Result := WaitCancelled(0);
+end;
+
+function TTraffiqxPollRun.WaitCancelled(ATimeoutMs: Cardinal): Boolean;
+begin
+  Result := FCancelEvent.WaitFor(ATimeoutMs) = wrSignaled;
+end;
+
+procedure TTraffiqxPollRun.Cancel;
+begin
+  FOwner.Lock;
+  try
+    if FDelivered or FDetached or IsCancelled then
+      Exit;
+    FCancelEvent.SetEvent;
+    // Unabhaengig von einem blockierenden GET sofort die Meldung einreihen.
+    // ForceQueue verhindert einen synchronen Callback aus CancelPolling heraus.
+    QueueResult(TTraffiqxPollResult.Cancelled);
+  finally
+    FOwner.Unlock;
+  end;
+end;
+
+procedure TTraffiqxPollRun.Detach;
+begin
+  FCancelEvent.SetEvent;
+  FOwner.Lock;
+  try
+    FDetached := True;
+  finally
+    FOwner.Unlock;
+  end;
+end;
+
+procedure TTraffiqxPollRun.QueueResult(const AResult: TTraffiqxPollResult);
+var
+  LRun: ITraffiqxPollRun;
+begin
+  LRun := Self;
+  TThread.ForceQueue(nil,
+    procedure
+    begin
+      LRun.Deliver(AResult);
+    end);
+end;
+
+procedure TTraffiqxPollRun.Deliver(const AResult: TTraffiqxPollResult);
+var
+  LRun: ITraffiqxPollRun;
+  LOwner: TTRAFFIQXInvoiceAPI;
+  LResult: TTraffiqxPollResult;
+  LHandler: TTraffiqxPollCompletedEvent;
+  LSessionMatches: Boolean;
+begin
+  LRun := Self;
+  // Der Monitor schuetzt die gesamte Besitzerverwendung auch gegen Free aus
+  // einem anderen Thread. Der Polling-Worker braucht diese Sperre nicht.
+  FOwner.Lock;
+  try
+    LOwner := FOwner.GetOwner;
+    if (LOwner = nil) or FDetached or FDelivered then
+      Exit;
+    if LOwner.FPollRun <> LRun then
+      Exit;
+    FDelivered := True;
+    // Vor dem Handler freigeben: dieser darf bereits den naechsten Lauf starten.
+    LOwner.FPollRun := nil;
+    LOwner.FPollFuture := nil;
+    LSessionMatches := LOwner.FCurrentSessionId = FSessionId;
+    LResult := AResult;
+    // Ein Session-Wechsel verhindert die Token-Uebernahme, nicht die Meldung.
+    // Bei gleicher Session gewinnt ein fertiger Erfolg vor spaetem Abbruch,
+    // wenn seine Zustellung zuerst ankommt.
+    if not LSessionMatches or (IsCancelled and not LResult.IsSuccess) then
+      LResult := TTraffiqxPollResult.Cancelled;
+    // Auch ein vom Aufrufer direkt abgebrochenes Future stoppt den Worker
+    // kooperativ, sobald dessen wartender Thread den Abbruch zugestellt hat.
+    if LResult.Status = psCancelled then
+      FCancelEvent.SetEvent;
+    if LSessionMatches then
+    begin
+      if LResult.IsSuccess then
+      begin
+        LOwner.FAccessToken := LResult.AccessToken;
+        LOwner.FRefreshToken := LResult.RefreshToken;
+        LOwner.FAccessTokenExpiresAt := LResult.AccessTokenExpiresAt;
+        LOwner.FRefreshTokenExpiresAt := LResult.RefreshTokenExpiresAt;
+      end;
+      // Auch bei zuerst zugestelltem Abbruch eine bereits als verbraucht
+      // markierte Session leeren; eine neue Session bleibt immer unberuehrt.
+      if ShouldClearSession then
+        LOwner.FCurrentSessionId := '';
+    end;
+    LHandler := LOwner.FOnPollingCompleted;
+    if Assigned(LHandler) then
+      LHandler(LResult, LOwner);
+    // Der Handler darf die API freigeben oder einen neuen Lauf starten.
+    // Danach niemals mehr auf LOwner zugreifen.
+  finally
+    FOwner.Unlock;
+  end;
+end;
+
+procedure TTraffiqxPollRun.EmitTrace(const AEntry: TTraffiqxHttpTrace);
+begin
+  // Unveraenderliche Handler-Kopie, ohne Besitzerzugriff oder Sperre. Ein
+  // bereits laufender Trace darf die Freigabe der API nicht blockieren.
+  if not IsCancelled and Assigned(FTrace) then
+    TTRAFFIQXInvoiceAPI.FireHttpTrace(FTrace, AEntry);
+end;
+
+procedure TTraffiqxPollRun.SetClearSession;
+begin
+  TInterlocked.Exchange(FClearSession, 1);
+end;
+
+function TTraffiqxPollRun.ShouldClearSession: Boolean;
+begin
+  Result := TInterlocked.CompareExchange(FClearSession, 0, 0) <> 0;
+end;
 
 function TraffiqxNormalizeId(const AValue: string): string;
 var
@@ -1517,7 +1758,8 @@ begin
   FApiBaseUri := '';
   FCurrentSessionId := '';
   FPollFuture := nil;
-  FPollCancelFlag := 0;
+  FPollRun := nil;
+  FPollOwner := TTraffiqxPollOwner.Create(Self);
   FOnPollingCompleted := nil;
   FOnOpenAuthUrl := nil;
   FOnHttpTrace := nil;
@@ -1530,7 +1772,16 @@ end;
 
 destructor TTRAFFIQXInvoiceAPI.Destroy;
 begin
-  CancelPolling;
+  // Keine Abbruchmeldung beim Zerstoeren. Detach sperrt gegen eine gerade
+  // laufende Zustellung, wartet aber weder auf HTTP noch auf das Future.
+  // Die gemeinsame Sperre entzieht auch einem im Callback neu gestarteten
+  // Lauf den Besitzer, falls Free aus einem anderen Thread wartet.
+  if FPollOwner <> nil then
+    FPollOwner.Detach;
+  if FPollRun <> nil then
+    FPollRun.Detach;
+  FPollRun := nil;
+  FPollFuture := nil;
   inherited;
 end;
 
@@ -1623,13 +1874,18 @@ end;
 
 procedure TTRAFFIQXInvoiceAPI.CancelPolling;
 begin
-  TInterlocked.Exchange(FPollCancelFlag, 1);
-
-  if Assigned(FPollFuture) and (FPollFuture.Status in
-    [TTaskStatus.Running, TTaskStatus.WaitingToRun, TTaskStatus.Created]) then
-    FPollFuture.Cancel;
-
-  FPollFuture := nil;
+  if TThread.CurrentThread.ThreadID <> MainThreadID then
+    raise EInvalidOperation.Create('CancelPolling muss im Hauptthread aufgerufen werden.');
+  // IFuture.Cancel beendet in der RTL nicht zwingend den Worker. Das Future
+  // bleibt deshalb fuer seinen Aufrufer bis zum wirklichen Worker-Ende gueltig.
+  FPollOwner.Lock;
+  try
+    FPollFuture := nil;
+    if FPollRun <> nil then
+      FPollRun.Cancel;
+  finally
+    FPollOwner.Unlock;
+  end;
 end;
 
 function TTRAFFIQXInvoiceAPI.CheckConnectionAccess(
@@ -1721,16 +1977,22 @@ begin
   Result := ContainsText(' ' + Trim(FScope) + ' ', ' offline_access ');
 end;
 
-function TTRAFFIQXInvoiceAPI.DefaultRefreshTokenExpiresAt(
-  const AIssuedAt: TDateTime): TDateTime;
+function PollRefreshTokenExpiresAt(const AIssuedAt: TDateTime;
+  AProviderType: TTraffiqxProviderType; AOfflineAccess: Boolean): TDateTime;
 begin
   Result := 0;
-  if not (FProviderType in [tpDatev,tpDatevSmartTransfer]) then
+  if not (AProviderType in [tpDatev,tpDatevSmartTransfer]) then
     Exit;
-  if ScopeContainsOfflineAccess then
+  if AOfflineAccess then
     Result := IncMonth(AIssuedAt, 6)
   else
     Result := IncHour(AIssuedAt, 11);
+end;
+
+function TTRAFFIQXInvoiceAPI.DefaultRefreshTokenExpiresAt(
+  const AIssuedAt: TDateTime): TDateTime;
+begin
+  Result := PollRefreshTokenExpiresAt(AIssuedAt, FProviderType, ScopeContainsOfflineAccess);
 end;
 
 function TTRAFFIQXInvoiceAPI.GetUserInfo(out AUserInfo: TTraffiqxUserInfo;
@@ -2445,7 +2707,7 @@ begin
     Result := TRACE_BODY_DROPPED;
 end;
 
-procedure TTRAFFIQXInvoiceAPI.FireHttpTrace(const ATrace: TTraffiqxHttpTraceEvent;
+class procedure TTRAFFIQXInvoiceAPI.FireHttpTrace(const ATrace: TTraffiqxHttpTraceEvent;
   const AEntry: TTraffiqxHttpTrace);
 begin
   // Ein Fehler im Protokoll darf den eigentlichen Aufruf nie stoeren.
@@ -2469,7 +2731,7 @@ begin
       + [TNetHeader.Create(AName, TTRAFFIQXInvoiceAPI.RedactUrl(AValue))];
 end;
 
-procedure TTRAFFIQXInvoiceAPI.FillTraceResponse(var AEntry: TTraffiqxHttpTrace;
+class procedure TTRAFFIQXInvoiceAPI.FillTraceResponse(var AEntry: TTraffiqxHttpTrace;
   const AResponse: IHTTPResponse; ABody: TTraffiqxTraceBody);
 var
   LHeader: TNetHeader;
@@ -2526,7 +2788,6 @@ type
   // gemeldet; die RequestId bekommt dafuer ".1", ".2" usw.
   TTraffiqxRedirectTracer = class
   public
-    Api: TTRAFFIQXInvoiceAPI;
     Trace: TTraffiqxHttpTraceEvent;
     BaseRequestId: string;
     Request: TTraffiqxHttpTrace;
@@ -2546,10 +2807,10 @@ var
   LHeader: TNetHeader;
 begin
   LEntry := Request;
-  Api.FillTraceResponse(LEntry, AResponse, tbOnError);
+  TTRAFFIQXInvoiceAPI.FillTraceResponse(LEntry, AResponse, tbOnError);
   LEntry.TimestampUtc := TDateTime.NowUTC;
   LEntry.DurationMs := TThread.GetTickCount64 - Started;
-  Api.FireHttpTrace(Trace, LEntry);
+  TTRAFFIQXInvoiceAPI.FireHttpTrace(Trace, LEntry);
 
   // Folgeanfrage so, wie die RTL sie baut: Location relativ zur bisherigen
   // URL, POST je nach RedirectsWithGET als GET ohne Inhaltsheader. Die
@@ -2585,11 +2846,21 @@ begin
   end;
 
   Request.TimestampUtc := TDateTime.NowUTC;
-  Api.FireHttpTrace(Trace, Request);
+  TTRAFFIQXInvoiceAPI.FireHttpTrace(Trace, Request);
   Started := TThread.GetTickCount64;
 end;
 
 function TTRAFFIQXInvoiceAPI.TraceExecute(AClient: TNetHTTPClient;
+  const AMethod, AUrl: string; const AHeaders: TNetHeaders;
+  ABody: TTraffiqxTraceBody; const ASend: TFunc<IHTTPResponse>): IHTTPResponse;
+begin
+  // Den Handler einmal lesen; die statische Ausfuehrung braucht keine API.
+  Result := TraceExecuteWithTrace(FOnHttpTrace, AClient, AMethod, AUrl,
+    AHeaders, ABody, ASend);
+end;
+
+class function TTRAFFIQXInvoiceAPI.TraceExecuteWithTrace(
+  const ATrace: TTraffiqxHttpTraceEvent; AClient: TNetHTTPClient;
   const AMethod, AUrl: string; const AHeaders: TNetHeaders;
   ABody: TTraffiqxTraceBody; const ASend: TFunc<IHTTPResponse>): IHTTPResponse;
 var
@@ -2600,9 +2871,7 @@ var
   LGuid: TGUID;
   LOldRedirect: THTTPRedirectEvent;
 begin
-  // Den Handler genau einmal lesen: Anfrage und Antwort gehen an denselben
-  // Empfaenger, auch wenn OnHttpTrace waehrenddessen umgesetzt wird.
-  LTrace := FOnHttpTrace;
+  LTrace := ATrace;
   if not Assigned(LTrace) then
     Exit(ASend());
 
@@ -2621,7 +2890,6 @@ begin
     LEntry.TimestampUtc := TDateTime.NowUTC;
     FireHttpTrace(LTrace, LEntry);
 
-    LTracer.Api := Self;
     LTracer.Trace := LTrace;
     LTracer.BaseRequestId := LEntry.RequestId;
     LTracer.Request := LEntry;
@@ -2762,18 +3030,34 @@ var
 begin
   Result := False;
 
-  if (FOAuthUri = '') or (FApiBaseUri = '') or (FAccessTokenUri = '') then
-    Exit;
-  if (FClientId = '') or (FClientSecret = '') or (FTRAFFIQXId = '') then
-    Exit;
-  if (FOAuth2BrokerCallbackUri = '') or (FOAuth2BrokerApiKey = '') then
-    Exit;
+  // Ohne laufendes Polling darf StartAuth in jedem Thread laufen. Waehrend
+  // eines Pollings gehoert die Instanz dem Hauptthread: Ein zweiter Thread
+  // koennte sonst nach dem Abbruch auf eine im Handler freigegebene Instanz
+  // zugreifen oder mit einem wartenden Handler verklemmen. Vor der Sperre
+  // pruefen, damit ein unzulaessiger Aufruf nicht erst auf sie wartet.
+  if (FPollRun <> nil) and (TThread.CurrentThread.ThreadID <> MainThreadID) then
+    raise EInvalidOperation.Create('StartAuth waehrend eines Pollings nur im Hauptthread.');
 
-  FAccessToken := '';
-  FRefreshToken := '';
-  FAccessTokenExpiresAt := 0;
-  FRefreshTokenExpiresAt := 0;
-  FCurrentSessionId := '';
+  FPollOwner.Lock;
+  try
+    if FPollRun <> nil then
+      FPollRun.Cancel;
+
+    if (FOAuthUri = '') or (FApiBaseUri = '') or (FAccessTokenUri = '') then
+      Exit;
+    if (FClientId = '') or (FClientSecret = '') or (FTRAFFIQXId = '') then
+      Exit;
+    if (FOAuth2BrokerCallbackUri = '') or (FOAuth2BrokerApiKey = '') then
+      Exit;
+
+    FAccessToken := '';
+    FRefreshToken := '';
+    FAccessTokenExpiresAt := 0;
+    FRefreshTokenExpiresAt := 0;
+    FCurrentSessionId := '';
+  finally
+    FPollOwner.Unlock;
+  end;
 
   try
     LSessionId := GenerateSessionId;
@@ -2815,13 +3099,23 @@ begin
       // wird die URL dorthin uebergeben statt im externen Browser geoeffnet.
       if Assigned(FOnOpenAuthUrl) then
       begin
-        FCurrentSessionId := LSessionId;
+        FPollOwner.Lock;
+        try
+          FCurrentSessionId := LSessionId;
+        finally
+          FPollOwner.Unlock;
+        end;
         Result := True;
         FOnOpenAuthUrl(LLocation);
       end
       else if ShellExecute(0, 'open', PChar(LLocation), nil, nil, SW_SHOWNORMAL) > 32 then
       begin
-        FCurrentSessionId := LSessionId;
+        FPollOwner.Lock;
+        try
+          FCurrentSessionId := LSessionId;
+        finally
+          FPollOwner.Unlock;
+        end;
         Result := True;
       end;
     finally
@@ -2836,32 +3130,11 @@ begin
   end;
 end;
 
-// Startet das Polling auf den Broker asynchron und liefert ein Future zur Auswertung.
-function TTRAFFIQXInvoiceAPI.BeginPolling(const AIntervalMs,
-  ATimeoutMs: Cardinal): IFuture<TTraffiqxPollResult>;
-var
-  LPollUrl: string;
-  LSessionId: string;
-  LApiKey: string;
-  LActiveFuture: IFuture<TTraffiqxPollResult>;
+// Diese freie Funktion erzeugt die Worker-Closure ohne implizites API-Self.
+function StartPollingWorker(const ARun: ITraffiqxPollRun;
+  const APollUrl, ASessionId, AApiKey: string; AProviderType: TTraffiqxProviderType;
+  AOfflineAccess, AHasTrace: Boolean; AIntervalMs, ATimeoutMs: Cardinal): IFuture<TTraffiqxPollResult>;
 begin
-  if FCurrentSessionId = '' then
-    raise Exception.Create('Es existiert keine aktive Session zum Polling.');
-  if FOAuth2BrokerApiKey = '' then
-    raise Exception.Create('API-Key ist nicht gesetzt.');
-  if AIntervalMs = 0 then
-    raise Exception.Create('Polling-Intervall darf nicht 0 sein.');
-
-  LPollUrl := BuildBrokerEndpoint('poll');
-  if LPollUrl = '' then
-    raise Exception.Create('Poll-Endpunkt konnte nicht ermittelt werden.');
-
-  LSessionId := FCurrentSessionId;
-  LApiKey := FOAuth2BrokerApiKey;
-
-  CancelPolling;
-  TInterlocked.Exchange(FPollCancelFlag, 0);
-
   Result := TTask.Future<TTraffiqxPollResult>(
     function: TTraffiqxPollResult
     var
@@ -2883,36 +3156,71 @@ begin
       LPollUri: string;
       LStartTick: UInt64;
       LElapsed: UInt64;
+      LWaitMs: Cardinal;
+      LHttpTimeoutMs: Integer;
+      LTrace: TTraffiqxHttpTraceEvent;
     begin
       Result := TTraffiqxPollResult.Pending;
+      LTrace := nil;
+      if AHasTrace then
+        LTrace :=
+          procedure(const AEntry: TTraffiqxHttpTrace)
+          begin
+            ARun.EmitTrace(AEntry);
+          end;
       LHttpClient := TNetHTTPClient.Create(nil);
       try
         SetLength(LHeaders, 1);
-        LHeaders[0] := TNameValuePair.Create('X-Api-Key', LApiKey);
-        LPollUri := LPollUrl + '?sessionId=' + TNetEncoding.URL.Encode(LSessionId);
+        LHeaders[0] := TNameValuePair.Create('X-Api-Key', AApiKey);
+        LPollUri := APollUrl + '?sessionId=' + TNetEncoding.URL.Encode(ASessionId);
         LStartTick := TThread.GetTickCount64;
 
         while True do
         begin
-          if (TInterlocked.CompareExchange(FPollCancelFlag, 0, 0) <> 0) then
+          if ARun.IsCancelled then
             Exit(TTraffiqxPollResult.Cancelled);
 
+          LHttpTimeoutMs := 15000;
           if ATimeoutMs > 0 then
           begin
             LElapsed := TThread.GetTickCount64 - LStartTick;
             if LElapsed >= ATimeoutMs then
               Exit(TTraffiqxPollResult.Timeout);
+            if ATimeoutMs - LElapsed < UInt64(LHttpTimeoutMs) then
+              LHttpTimeoutMs := Integer(ATimeoutMs - LElapsed);
+            if LHttpTimeoutMs < 1000 then
+              LHttpTimeoutMs := 1000;
           end;
+          // HTTP-Wartezeiten begrenzen: die RTL wartet am Ende auf den Worker.
+          // Bei kurzer Restlaufzeit mindestens 1000 ms je HTTP-Timeout setzen.
+          LHttpClient.ConnectionTimeout := LHttpTimeoutMs;
+          LHttpClient.ResponseTimeout := LHttpTimeoutMs;
 
           try
-            LResponse := HttpGet(LHttpClient, LPollUri, nil, LHeaders, tbOnError);
+            LResponse := TTRAFFIQXInvoiceAPI.TraceExecuteWithTrace(LTrace,
+              LHttpClient, 'GET', LPollUri, LHeaders, tbOnError,
+              function: IHTTPResponse
+              begin
+                Result := LHttpClient.Get(LPollUri, nil, LHeaders);
+              end);
           except
             on E: Exception do
             begin
+              if ARun.IsCancelled then
+                Exit(TTraffiqxPollResult.Cancelled);
+              if (ATimeoutMs > 0) and
+                (TThread.GetTickCount64 - LStartTick >= ATimeoutMs) then
+                Exit(TTraffiqxPollResult.Timeout);
               Result := TTraffiqxPollResult.Fail('transport_error', E.Message);
               Exit(Result);
             end;
           end;
+
+          if ARun.IsCancelled then
+            Exit(TTraffiqxPollResult.Cancelled);
+          if (ATimeoutMs > 0) and
+            (TThread.GetTickCount64 - LStartTick >= ATimeoutMs) then
+            Exit(TTraffiqxPollResult.Timeout);
 
           if (LResponse.StatusCode < 200) or (LResponse.StatusCode >= 400) then
             Exit(TTraffiqxPollResult.Fail(
@@ -2931,7 +3239,17 @@ begin
 
             if SameText(LStatus, 'pending') then
             begin
-              TThread.Sleep(AIntervalMs);
+              LWaitMs := AIntervalMs;
+              if ATimeoutMs > 0 then
+              begin
+                LElapsed := TThread.GetTickCount64 - LStartTick;
+                if LElapsed >= ATimeoutMs then
+                  Exit(TTraffiqxPollResult.Timeout);
+                if UInt64(LWaitMs) > ATimeoutMs - LElapsed then
+                  LWaitMs := Cardinal(ATimeoutMs - LElapsed);
+              end;
+              if ARun.WaitCancelled(LWaitMs) then
+                Exit(TTraffiqxPollResult.Cancelled);
               Continue;
             end;
 
@@ -2971,20 +3289,11 @@ begin
               // zaehlt ab der Anmeldung, also ab jetzt.
               if (LRefreshToken <> '') and (LRefreshTokenExpiresAt = 0) then
               begin
-                LRefreshTokenExpiresAt := DefaultRefreshTokenExpiresAt(Now);
-                LRefreshTokenExpiresAtUtc := DefaultRefreshTokenExpiresAt(TDateTime.NowUTC);
+                LRefreshTokenExpiresAt := PollRefreshTokenExpiresAt(Now, AProviderType, AOfflineAccess);
+                LRefreshTokenExpiresAtUtc := PollRefreshTokenExpiresAt(TDateTime.NowUTC, AProviderType, AOfflineAccess);
               end;
 
-              TMonitor.Enter(Self);
-              try
-                FAccessToken := LAccessToken;
-                FRefreshToken := LRefreshToken;
-                FAccessTokenExpiresAt := LAccessTokenExpiresAt;
-                FRefreshTokenExpiresAt := LRefreshTokenExpiresAt;
-                FCurrentSessionId := '';
-              finally
-                TMonitor.Exit(Self);
-              end;
+              ARun.SetClearSession;
 
               LPollResult := TTraffiqxPollResult.Success(LAccessToken, LRefreshToken, LAccessTokenExpiresAt, LRefreshTokenExpiresAt);
               LPollResult.AccessTokenExpiresAtUtc := LAccessTokenExpiresAtUtc;
@@ -3001,22 +3310,12 @@ begin
                   LErrorCode := 'poll_error';
                 if not LErrorObj.TryGetValue<string>('description', LErrorDescription) then
                   LErrorDescription := 'Unbekannter Fehler.';
-                TMonitor.Enter(Self);
-                try
-                  FCurrentSessionId := '';
-                finally
-                  TMonitor.Exit(Self);
-                end;
+                ARun.SetClearSession;
                 Exit(TTraffiqxPollResult.Fail(LErrorCode, LErrorDescription));
               end
               else
               begin
-                TMonitor.Enter(Self);
-                try
-                  FCurrentSessionId := '';
-                finally
-                  TMonitor.Exit(Self);
-                end;
+                ARun.SetClearSession;
                 Exit(TTraffiqxPollResult.Fail('poll_error', 'Provider meldete einen Fehler.'));
               end;
             end;
@@ -3030,42 +3329,73 @@ begin
         LHttpClient.Free;
       end;
     end);
+end;
 
-  FPollFuture := Result;
-  LActiveFuture := Result;
-
+// Auch der wartende Thread und die Queue halten ausschliesslich Lauf/Future.
+procedure WatchPollingFuture(const ARun: ITraffiqxPollRun;
+  const AFuture: IFuture<TTraffiqxPollResult>);
+begin
   TThread.CreateAnonymousThread(
     procedure
     var
       LPollResult: TTraffiqxPollResult;
     begin
       try
-        LPollResult := LActiveFuture.Value;
+        LPollResult := AFuture.Value;
       except
         on E: EOperationCancelled do
           LPollResult := TTraffiqxPollResult.Cancelled;
         on E: Exception do
           LPollResult := TTraffiqxPollResult.Fail('poll_future_error', E.Message);
       end;
-
-      TMonitor.Enter(Self);
-      try
-        if FPollFuture = LActiveFuture then
-          FPollFuture := nil;
-      finally
-        TMonitor.Exit(Self);
-      end;
-
-      if not Assigned(FOnPollingCompleted) then
-        Exit;
-
-      TThread.Queue(nil,
-        procedure
-        begin
-          if Assigned(FOnPollingCompleted) then
-            FOnPollingCompleted(LPollResult,self);
-        end);
+      ARun.QueueResult(LPollResult);
     end).Start;
+end;
+
+// Startet das Polling auf den Broker asynchron und liefert ein Future zur Auswertung.
+function TTRAFFIQXInvoiceAPI.BeginPolling(const AIntervalMs,
+  ATimeoutMs: Cardinal): IFuture<TTraffiqxPollResult>;
+var
+  LPollUrl: string;
+  LRun: ITraffiqxPollRun;
+begin
+  if TThread.CurrentThread.ThreadID <> MainThreadID then
+    raise EInvalidOperation.Create('BeginPolling muss im Hauptthread aufgerufen werden.');
+  FPollOwner.Lock;
+  try
+    if FCurrentSessionId = '' then
+      raise Exception.Create('Es existiert keine aktive Session zum Polling.');
+    if FOAuth2BrokerApiKey = '' then
+      raise Exception.Create('API-Key ist nicht gesetzt.');
+    if AIntervalMs = 0 then
+      raise Exception.Create('Polling-Intervall darf nicht 0 sein.');
+
+    LPollUrl := BuildBrokerEndpoint('poll');
+    if LPollUrl = '' then
+      raise Exception.Create('Poll-Endpunkt konnte nicht ermittelt werden.');
+
+    // Ersetzen ist ein stiller Abbruch: alte Queue-Eintraege duerfen weder
+    // Tokens uebernehmen noch den Handler des neuen Laufs aufrufen.
+    if FPollRun <> nil then
+      FPollRun.Detach;
+    FPollFuture := nil;
+    LRun := TTraffiqxPollRun.Create(FPollOwner, FCurrentSessionId, FOnHttpTrace);
+    FPollRun := LRun;
+    try
+      Result := StartPollingWorker(LRun, LPollUrl, FCurrentSessionId,
+        FOAuth2BrokerApiKey, FProviderType, ScopeContainsOfflineAccess,
+        Assigned(FOnHttpTrace), AIntervalMs, ATimeoutMs);
+      FPollFuture := Result;
+      WatchPollingFuture(LRun, Result);
+    except
+      LRun.Detach;
+      FPollRun := nil;
+      FPollFuture := nil;
+      raise;
+    end;
+  finally
+    FPollOwner.Unlock;
+  end;
 end;
 
 function TTRAFFIQXInvoiceAPI.RefreshAccessToken : Boolean;//(const _RefreshToken: String;
