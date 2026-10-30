@@ -30,6 +30,7 @@ type
   TMiniAppLogKind = (lkInfo, lkWarning, lkError);
   TMiniAppLogEvent = reference to procedure(const AText: string; AKind: TMiniAppLogKind);
   TMiniAppChangedEvent = reference to procedure;
+  TMiniAppInboxResultEvent = reference to procedure(const AText: string; AInvalidCount: Integer);
   TMiniAppConfirmLoginEvent = reference to function: Boolean;
 
   TMiniAppService = class;
@@ -39,6 +40,7 @@ type
   IMiniAppOutboxSink = interface
     procedure Entry(const AText: string; AKind: TMiniAppLogKind; const AHelpUrl: string);
     procedure Changed;
+    procedure InboxResult(const AText: string; AInvalidCount: Integer);
     procedure Finished;
     procedure Detach;
   end;
@@ -53,6 +55,7 @@ type
     FOperation: ITask;
     FOutboxSink: IMiniAppOutboxSink;
     FOnOutboxChanged: TMiniAppChangedEvent;
+    FOnInboxResult: TMiniAppInboxResultEvent;
     FConfig: TMiniAppClientConfig;
     FEnvironment: TMiniAppEnvironment;
     FLog: TMiniAppLogEvent;
@@ -68,6 +71,7 @@ type
     FStorageBlocked: Boolean;
     FUserName: string;
     FHelpUrl: string;
+    function CreateWorkerApi: TTRAFFIQXInvoiceAPI;
     procedure RequireMainThread;
     procedure Changed;
     procedure SetBusy(AValue: Boolean);
@@ -100,6 +104,8 @@ type
     procedure SetEnvironment(AEnvironment: TMiniAppEnvironment);
     procedure StartOutbox(const AInvoiceNumber: string; ASend: Boolean;
       AAllowResend: Boolean = False);
+    procedure StartInbox(AAll: Boolean; const AMetadataDocumentID: string = '');
+    property OnInboxResult: TMiniAppInboxResultEvent read FOnInboxResult write FOnInboxResult;
     property OnOutboxChanged: TMiniAppChangedEvent read FOnOutboxChanged write FOnOutboxChanged;
     property OnChanged: TMiniAppChangedEvent read FOnChanged write FOnChanged;
     property OnConfirmLoginUnconfirmed: TMiniAppConfirmLoginEvent
@@ -122,7 +128,7 @@ type
 implementation
 
 uses
-  System.Classes, System.DateUtils, System.NetEncoding, System.IOUtils,
+  System.Classes, System.DateUtils, System.NetEncoding, System.IOUtils, System.JSON,
   intf.TRAFFIQXHttpLog;
 
 type
@@ -133,6 +139,7 @@ type
     constructor Create(AOwner: TMiniAppService);
     procedure Entry(const AText: string; AKind: TMiniAppLogKind; const AHelpUrl: string);
     procedure Changed;
+    procedure InboxResult(const AText: string; AInvalidCount: Integer);
     procedure Finished;
     procedure Detach;
   end;
@@ -164,6 +171,12 @@ procedure TMiniAppOutboxSink.Changed;
 begin
   if (FOwner <> nil) and Assigned(FOwner.FOnOutboxChanged) then
     FOwner.FOnOutboxChanged();
+end;
+
+procedure TMiniAppOutboxSink.InboxResult(const AText: string; AInvalidCount: Integer);
+begin
+  if (FOwner <> nil) and Assigned(FOwner.FOnInboxResult) then
+    FOwner.FOnInboxResult(FOwner.SafeText(AText), AInvalidCount);
 end;
 
 procedure TMiniAppOutboxSink.Finished;
@@ -533,6 +546,39 @@ begin
   SetBusy(True);
   LApi := nil;
   try
+    LApi := CreateWorkerApi;
+    LSink := FOutboxSink;
+    FOperation := TTask.Run(
+      procedure
+      begin
+        try
+          try
+            ExecuteOutbox(LApi, AInvoiceNumber, ASend, AAllowResend, LSink);
+          finally
+            LApi.Free;
+          end;
+        finally
+          TThread.Queue(nil,
+            procedure
+            begin
+              LSink.Finished;
+            end);
+        end;
+      end);
+  except
+    LApi.Free;
+    SetBusy(False);
+    raise;
+  end;
+end;
+
+
+function TMiniAppService.CreateWorkerApi: TTRAFFIQXInvoiceAPI;
+var
+  LApi: TTRAFFIQXInvoiceAPI;
+begin
+  LApi := nil;
+  try
     LApi := TTRAFFIQXInvoiceAPI.Create;
     LApi.ProviderType := FApi.ProviderType;
     LApi.Environment := FApi.Environment;
@@ -546,13 +592,243 @@ begin
     LApi.AccessToken := FApi.AccessToken;
     LApi.AccessTokenExpiresAt := FApi.AccessTokenExpiresAt;
     TTraffiqxHttpLog.Attach(LApi);
+    Result := LApi;
+  except
+    LApi.Free;
+    raise;
+  end;
+end;
+
+procedure QueueInboxResult(const ASink: IMiniAppOutboxSink; const AText: string;
+  AInvalidCount: Integer);
+begin
+  TThread.Queue(nil,
+    procedure
+    begin
+      ASink.InboxResult(AText, AInvalidCount);
+    end);
+end;
+
+procedure RequireInboxToken(AApi: TTRAFFIQXInvoiceAPI);
+begin
+  if AApi.AccessTokenExpiresAt <= IncSecond(Now, 15) then
+    raise EInvalidOperation.Create('Access-Token reicht nicht mehr. Posteingang erneut abrufen; ' +
+      'offene IDs bleiben vorgemerkt. Fehlende Metadaten separat nachholen.');
+end;
+
+procedure ExecuteInbox(AApi: TTRAFFIQXInvoiceAPI; AAll: Boolean;
+  const AMetadataDocumentID: string; const ASink: IMiniAppOutboxSink);
+var
+  LDocuments: TTraffiqxInboxDocumentList;
+  LDocument: TTraffiqxInboxDocument;
+  LError: TTraffiqxError;
+  LSeen: TStringList;
+  LID, LSummary: string;
+  LCount, LFailures, LInvalid: Integer;
+
+  procedure Report(const AText: string; AKind: TMiniAppLogKind);
+  begin
+    QueueOutboxEntry(ASink, SafeOutboxText(AApi, AText), AKind);
+  end;
+
+  procedure ApiFailure(const AContext: string; AError: TTraffiqxError; AKind: TMiniAppLogKind);
+  begin
+    Inc(LFailures);
+    QueueOutboxEntry(ASink, SafeOutboxText(AApi,
+      AContext + ': ' + TTraffiqxInboxErrorHelper.ErrorText(AError)), AKind,
+      SafeOutboxText(AApi, TTraffiqxInboxErrorHelper.HelpUrl(AError)));
+  end;
+
+  procedure FetchMetadata(const AID: string);
+  var
+    LMetadata: TTraffiqxInboxDocumentMetadata;
+    LMetadataError: TTraffiqxError;
+    LJson: TJSONObject;
+  begin
+    LMetadata := nil;
+    LMetadataError := nil;
+    try
+      try
+        RequireInboxToken(AApi);
+        if not AApi.GetInboxDocumentMetadata(AID, LMetadata, LMetadataError) then
+        begin
+          ApiFailure(AID + ': Metadaten fehlen; mit „Metadaten nachholen“ erneut versuchen',
+            LMetadataError, lkWarning);
+          Exit;
+        end;
+        if (LMetadata = nil) or (LMetadata.DocumentFormat = '') then
+          raise EConvertError.Create('Metadaten enthalten kein Dokumentformat.');
+        // Auch bei anschließendem Schreibfehler muss der Kunde vom Befund erfahren.
+        if not LMetadata.EN16931Compliant then Inc(LInvalid);
+        LJson := LMetadata.ToJson;
+        try
+          SaveInboxMetadata(AID, LJson.ToJSON);
+        finally
+          LJson.Free;
+        end;
+      except
+        on E: Exception do
+        begin
+          Inc(LFailures);
+          Report(AID + ': Metadaten nicht gespeichert; Dokument bleibt abgelegt. ' +
+            '„Metadaten nachholen“ verwenden. ' + E.Message, lkWarning);
+        end;
+      end;
+    finally
+      LMetadata.Free;
+      LMetadataError.Free;
+    end;
+  end;
+
+  procedure ProcessDocument(const AID: string; AMetadataOnly: Boolean);
+  var
+    LContent: TMemoryStream;
+    LDownloadError: TTraffiqxError;
+    LInfo: TMiniAppInboxInfo;
+    LNeedMetadata: Boolean;
+  begin
+    LContent := nil;
+    LDownloadError := nil;
+    try
+      try
+        if not InboxDocumentStored(AID) then
+        begin
+          if AMetadataOnly then
+            raise EReadError.Create('Dokument ist noch nicht vollständig abgelegt.');
+          // Ohne persistierte ID niemals herunterladen: DATEV setzt downloaded sofort.
+          MarkInboxPending(AID, True);
+          RequireInboxToken(AApi);
+          if not AApi.DownloadInboxDocument(AID, LContent, LDownloadError) then
+          begin
+            if (LDownloadError <> nil) and (LDownloadError.Status = 404) then
+            begin
+              MarkInboxPending(AID, False);
+              ApiFailure(AID + ': bei DATEV nicht mehr vorhanden; aus Offen-Liste entfernt',
+                LDownloadError, lkWarning);
+            end
+            else
+              ApiFailure(AID + ': Download fehlgeschlagen; bleibt vorgemerkt', LDownloadError, lkError);
+            Exit;
+          end;
+          ArchiveInboxDocument(AID, LContent);
+        end;
+        Inc(LCount);
+        LNeedMetadata := AMetadataOnly;
+        if not LNeedMetadata then
+        begin
+          try
+            LInfo := LoadInboxInfo(AID);
+            LNeedMetadata := not LInfo.HasMetadata;
+            if LInfo.HasMetadata and not LInfo.EN16931Compliant then Inc(LInvalid);
+          except
+            // Beschädigte Metadaten lassen sich ohne erneuten Download ersetzen.
+            LNeedMetadata := True;
+          end;
+        end;
+        if LNeedMetadata then FetchMetadata(AID);
+        // Metadatenfehler hindern die vollständige Dokumentablage nicht.
+        MarkInboxPending(AID, False);
+        Report(AID + ': vollständig im Eingang abgelegt.', lkInfo);
+      except
+        on E: Exception do
+        begin
+          Inc(LFailures);
+          Report(AID + ': ' + E.Message + ' Vorhandene Vormerkung bleibt erhalten.', lkError);
+        end;
+      end;
+    finally
+      LDownloadError.Free;
+      LContent.Free;
+    end;
+  end;
+
+begin
+  LCount := 0;
+  LFailures := 0;
+  LInvalid := 0;
+  LDocuments := nil;
+  LError := nil;
+  LSeen := TStringList.Create;
+  try
+    try
+      // Vor jeder Inbox-API und jeder Änderung der Offen-Liste prüfen.
+      // Trennen oder Neustart mit anderer .env darf keine fremde ID austragen.
+      if AApi.Environment = teSandbox then
+        EnsureInboxContext(meSandbox, AApi.TRAFFIQXId)
+      else
+        EnsureInboxContext(meProduction, AApi.TRAFFIQXId);
+      LSeen.CaseSensitive := True;
+      if AMetadataDocumentID <> '' then
+        ProcessDocument(AMetadataDocumentID, True)
+      else
+      begin
+        // Erst den lokalen Wiederanlauf abschließen, danach neue IDs anfragen.
+        for LID in LoadPendingInbox do
+        begin
+          RequireInboxToken(AApi);
+          if LSeen.IndexOf(LID) >= 0 then Continue;
+          LSeen.Add(LID);
+          ProcessDocument(LID, False);
+        end;
+        RequireInboxToken(AApi);
+        if not AApi.GetInboxDocumentIds(LDocuments, LError, not AAll, False) then
+          ApiFailure('Posteingangsliste konnte nicht abgerufen werden', LError, lkError)
+        else
+          for LDocument in LDocuments do
+          begin
+            RequireInboxToken(AApi);
+            if LSeen.IndexOf(LDocument.DocumentId) >= 0 then Continue;
+            LSeen.Add(LDocument.DocumentId);
+            ProcessDocument(LDocument.DocumentId, False);
+          end;
+      end;
+    except
+      on E: Exception do
+      begin
+        Inc(LFailures);
+        Report('Posteingang abgebrochen: ' + E.Message, lkError);
+      end;
+    end;
+  finally
+    LSummary := Format('Posteingang: %d Dokumente lokal vorhanden; %d Warnungen/Fehler. ',
+      [LCount, LFailures]);
+    if LInvalid > 0 then
+      LSummary := LSummary + Format('%d ungültige E-Rechnungen (EN-16931: nein)! Bitte prüfen.', [LInvalid])
+    else
+      LSummary := LSummary + 'Keine ungültigen E-Rechnungen festgestellt; fehlende Metadaten bleiben ungeprüft.';
+    if (LInvalid > 0) or (LFailures > 0) then Report(LSummary, lkWarning)
+    else Report(LSummary, lkInfo);
+    QueueInboxResult(ASink, LSummary, LInvalid);
+    LSeen.Free;
+    LError.Free;
+    LDocuments.Free;
+  end;
+end;
+
+procedure TMiniAppService.StartInbox(AAll: Boolean; const AMetadataDocumentID: string);
+var
+  LApi: TTRAFFIQXInvoiceAPI;
+  LSink: IMiniAppOutboxSink;
+begin
+  RequireMainThread;
+  if FBusy or FConnecting then Exit;
+  if not Connected then
+  begin
+    Log('Nicht verbunden – zuerst die DATEV-Verbindung herstellen und prüfen.', lkWarning);
+    Exit;
+  end;
+  if not EnsureAccessToken(120) then Exit;
+  SetBusy(True);
+  LApi := nil;
+  try
+    LApi := CreateWorkerApi;
     LSink := FOutboxSink;
     FOperation := TTask.Run(
       procedure
       begin
         try
           try
-            ExecuteOutbox(LApi, AInvoiceNumber, ASend, AAllowResend, LSink);
+            ExecuteInbox(LApi, AAll, AMetadataDocumentID, LSink);
           finally
             LApi.Free;
           end;
@@ -651,6 +927,7 @@ begin
   FOperation := nil;
   FOutboxSink := nil;
   FOnOutboxChanged := nil;
+  FOnInboxResult := nil;
   FOnChanged := nil;
   FOnConfirmLoginUnconfirmed := nil;
   FLog := nil;

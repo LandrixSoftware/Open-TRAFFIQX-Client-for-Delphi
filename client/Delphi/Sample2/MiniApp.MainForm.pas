@@ -167,6 +167,14 @@ type
     OutgoingSplitter: TSplitter;
     IncomingTab: TTabSheet;
     IncomingHint: TLabel;
+    IncomingResult: TLabel;
+    IncomingButtons: TFlowPanel;
+    FetchInboxButton: TButton;
+    SyncInboxButton: TButton;
+    ShowInboxButton: TButton;
+    OpenInboxFolderButton: TButton;
+    InboxMetadataButton: TButton;
+    IncomingList: TListView;
     ProtocolTab: TTabSheet;
     ProtocolHint: TLabel;
     ProtocolHelpLink: TLinkLabel;
@@ -186,6 +194,14 @@ type
     procedure PositionNewClick(Sender: TObject);
     procedure PositionDeleteClick(Sender: TObject);
     procedure PositionApplyClick(Sender: TObject);
+    procedure IncomingShow(Sender: TObject);
+    procedure IncomingSelected(Sender: TObject; Item: TListItem; Selected: Boolean);
+    procedure IncomingDrawItem(Sender: TCustomListView; Item: TListItem;
+      State: TCustomDrawState; var DefaultDraw: Boolean);
+    procedure FetchInboxClick(Sender: TObject);
+    procedure ShowInboxClick(Sender: TObject);
+    procedure OpenInboxFolderClick(Sender: TObject);
+    procedure InboxMetadataClick(Sender: TObject);
     procedure OutgoingShow(Sender: TObject);
     procedure OutgoingSelected(Sender: TObject; Item: TListItem; Selected: Boolean);
     procedure SendInvoiceClick(Sender: TObject);
@@ -231,6 +247,9 @@ type
     function ConfirmPositionChange: Boolean;
     function SaveData: Boolean;
     procedure RefreshOutgoingCustomers;
+    procedure RefreshIncoming;
+    procedure UpdateIncomingControls;
+    procedure InboxResult(const AText: string; AInvalidCount: Integer);
     procedure RefreshOutgoing;
     procedure ShowOutgoingDetails;
     procedure UpdateOutgoingControls;
@@ -312,10 +331,12 @@ begin
     end);
   FService.OnChanged := UpdateConnection;
   FService.OnOutboxChanged := RefreshOutgoing;
+  FService.OnInboxResult := InboxResult;
   FService.OnConfirmLoginUnconfirmed := ConfirmLoginUnconfirmed;
   UpdateConnection;
   ValidateInvoiceButton.Enabled := FClientConfig.XRechnungDistributionDir <> '';
   OutgoingShow(nil);
+  RefreshIncoming;
 end;
 
 destructor TMiniAppMainForm.Destroy;
@@ -883,6 +904,155 @@ begin
   end;
 end;
 
+procedure TMiniAppMainForm.RefreshIncoming;
+var
+  LIDs: TStringList;
+  LID, LDirectory, LSelected: string;
+  LItem: TListItem;
+  LInfo: TMiniAppInboxInfo;
+begin
+  LSelected := '';
+  if IncomingList.Selected <> nil then LSelected := IncomingList.Selected.Caption;
+  LIDs := TStringList.Create;
+  IncomingList.Items.BeginUpdate;
+  try
+    try
+      // Temporäre Nachbarordner sind Diagnosebestände, keine weiteren Dokumente.
+      for LDirectory in TDirectory.GetDirectories(IncomingDirectory) do
+      begin
+        LID := ExtractFileName(LDirectory);
+        if LID.EndsWith('.tmp') and LID.Contains('.{') then Continue;
+        LIDs.Add(LID);
+      end;
+      try
+        for LID in LoadPendingInbox do
+          if LIDs.IndexOf(LID) < 0 then LIDs.Add(LID);
+      except
+        on E: Exception do Log('Offen-Liste nicht lesbar: ' + E.Message, lkError);
+      end;
+      LIDs.Sort;
+      IncomingList.Clear;
+      for LID in LIDs do
+      begin
+        LItem := IncomingList.Items.Add;
+        LItem.Caption := LID;
+        LItem.SubItems.Add('');
+        LItem.SubItems.Add('');
+        LItem.SubItems.Add('unbekannt');
+        LItem.SubItems.Add('ungeprüft');
+        LItem.SubItems.Add('ausstehend');
+        try
+          if InboxDocumentStored(LID) then LItem.SubItems[4] := 'vollständig';
+          LInfo := LoadInboxInfo(LID);
+          if LInfo.HasMetadata then
+          begin
+            LItem.SubItems[0] := LInfo.SellerName;
+            LItem.SubItems[1] := LInfo.ReceivedAt;
+            LItem.SubItems[2] := LInfo.DocumentFormat;
+            if LInfo.EN16931Compliant then LItem.SubItems[3] := 'ja'
+            else LItem.SubItems[3] := 'nein';
+          end;
+        except
+          on E: Exception do
+          begin
+            LItem.SubItems[2] := 'Ablage/Metadaten prüfen';
+            Log(LID + ': ' + E.Message, lkWarning);
+          end;
+        end;
+        if LID = LSelected then LItem.Selected := True;
+      end;
+    except
+      on E: Exception do Log('Eingang konnte nicht gelesen werden: ' + E.Message, lkError);
+    end;
+  finally
+    IncomingList.Items.EndUpdate;
+    LIDs.Free;
+  end;
+  UpdateIncomingControls;
+end;
+
+procedure TMiniAppMainForm.UpdateIncomingControls;
+var
+  LReady, LStored: Boolean;
+begin
+  LReady := (FService <> nil) and not (FService.Busy or FService.Connecting) and FService.Connected;
+  LStored := (IncomingList.Selected <> nil) and
+    (IncomingList.Selected.SubItems.Count >= 5) and
+    (IncomingList.Selected.SubItems[4] = 'vollständig');
+  FetchInboxButton.Enabled := LReady;
+  SyncInboxButton.Enabled := LReady;
+  InboxMetadataButton.Enabled := LReady and LStored;
+  // Die vollständige lokale Ablage bleibt auch ohne DATEV-Verbindung zugänglich.
+  ShowInboxButton.Enabled := LStored;
+  OpenInboxFolderButton.Enabled := LStored;
+end;
+
+procedure TMiniAppMainForm.InboxResult(const AText: string; AInvalidCount: Integer);
+begin
+  IncomingResult.Caption := AText;
+  IncomingResult.Font.Color := clWindowText;
+  if AInvalidCount > 0 then IncomingResult.Font.Color := clRed;
+  RefreshIncoming;
+end;
+
+procedure TMiniAppMainForm.IncomingShow(Sender: TObject);
+begin
+  if FData <> nil then RefreshIncoming;
+end;
+
+procedure TMiniAppMainForm.IncomingSelected(Sender: TObject; Item: TListItem; Selected: Boolean);
+begin
+  UpdateIncomingControls;
+end;
+
+procedure TMiniAppMainForm.IncomingDrawItem(Sender: TCustomListView; Item: TListItem;
+  State: TCustomDrawState; var DefaultDraw: Boolean);
+begin
+  Sender.Canvas.Font.Color := clWindowText;
+  if (Item.SubItems.Count >= 4) and (Item.SubItems[3] = 'nein') then
+    Sender.Canvas.Font.Color := clRed;
+  DefaultDraw := True;
+end;
+
+procedure TMiniAppMainForm.FetchInboxClick(Sender: TObject);
+begin
+  try
+    FService.StartInbox(Sender = SyncInboxButton);
+  except
+    on E: Exception do ValidationError('Posteingang konnte nicht gestartet werden: ' + E.Message);
+  end;
+end;
+
+procedure TMiniAppMainForm.InboxMetadataClick(Sender: TObject);
+begin
+  if IncomingList.Selected = nil then Exit;
+  try
+    FService.StartInbox(False, IncomingList.Selected.Caption);
+  except
+    on E: Exception do ValidationError('Metadatenabruf konnte nicht gestartet werden: ' + E.Message);
+  end;
+end;
+
+procedure TMiniAppMainForm.ShowInboxClick(Sender: TObject);
+begin
+  if IncomingList.Selected = nil then Exit;
+  try
+    OpenLocalPath(FirstInboxFile(IncomingList.Selected.Caption));
+  except
+    on E: Exception do ValidationError(E.Message);
+  end;
+end;
+
+procedure TMiniAppMainForm.OpenInboxFolderClick(Sender: TObject);
+begin
+  if IncomingList.Selected = nil then Exit;
+  try
+    OpenLocalPath(IncomingDocumentDirectory(IncomingList.Selected.Caption));
+  except
+    on E: Exception do ValidationError(E.Message);
+  end;
+end;
+
 procedure TMiniAppMainForm.RefreshOutgoing;
 var
   LDirectory, LNumber, LSelected: string;
@@ -1315,6 +1485,7 @@ begin
   ConnectionHelpLink.Hint := FService.HelpUrl;
   ProtocolHelpLink.Hint := FService.HelpUrl;
   UpdateOutgoingControls;
+  UpdateIncomingControls;
 end;
 
 function TMiniAppMainForm.ConfirmLoginUnconfirmed: Boolean;

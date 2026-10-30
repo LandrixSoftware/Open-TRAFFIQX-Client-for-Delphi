@@ -1271,14 +1271,102 @@
     end
     object IncomingTab: TTabSheet
       Caption = 'Eingang'
+      OnShow = IncomingShow
       object IncomingHint: TLabel
         Align = alTop
         AutoSize = False
-        Height = 36
+        Height = 56
         Top = 0
-        Caption = 'folgt in Scheibe S6'
+        Caption = 'Die Eingangsrechnungen liegen im Ordner Daten\eingang; die DATEV E-Rechnungsplattform archiviert nicht GoBD-konform.'
         WordWrap = True
         Layout = tlCenter
+      end
+      object IncomingResult: TLabel
+        Align = alTop
+        AutoSize = False
+        Height = 64
+        Top = 56
+        Caption = 'Zuerst DATEV-Verbindung prüfen und einmal „Alle abgleichen“ wählen. Danach den Posteingang bei Bedarf abrufen. Ungeprüfte Dokumente: Metadaten nachholen.'
+        WordWrap = True
+        Layout = tlCenter
+      end
+      object IncomingButtons: TFlowPanel
+        Align = alTop
+        Top = 120
+        Height = 90
+        BevelOuter = bvNone
+        TabOrder = 0
+        object FetchInboxButton: TButton
+          Width = 175
+          Height = 32
+          Caption = 'Posteingang abrufen'
+          TabOrder = 0
+          OnClick = FetchInboxClick
+        end
+        object SyncInboxButton: TButton
+          Width = 140
+          Height = 32
+          Caption = 'Alle abgleichen'
+          TabOrder = 1
+          OnClick = FetchInboxClick
+        end
+        object ShowInboxButton: TButton
+          Width = 165
+          Height = 32
+          Caption = 'Dokument anzeigen'
+          TabOrder = 2
+          OnClick = ShowInboxClick
+        end
+        object OpenInboxFolderButton: TButton
+          Width = 135
+          Height = 32
+          Caption = 'Ordner öffnen'
+          TabOrder = 3
+          OnClick = OpenInboxFolderClick
+        end
+        object InboxMetadataButton: TButton
+          Width = 180
+          Height = 32
+          Caption = 'Metadaten nachholen'
+          TabOrder = 4
+          OnClick = InboxMetadataClick
+        end
+      end
+      object IncomingList: TListView
+        Align = alClient
+        Top = 210
+        TabOrder = 1
+        ReadOnly = True
+        RowSelect = True
+        HideSelection = False
+        ViewStyle = vsReport
+        OnSelectItem = IncomingSelected
+        OnCustomDrawItem = IncomingDrawItem
+        Columns = <
+          item
+            Caption = 'document_id'
+            Width = 285
+          end
+          item
+            Caption = 'Absender'
+            Width = 170
+          end
+          item
+            Caption = 'Eingang'
+            Width = 180
+          end
+          item
+            Caption = 'Format'
+            Width = 150
+          end
+          item
+            Caption = 'EN-16931 gültig'
+            Width = 125
+          end
+          item
+            Caption = 'Ablage'
+            Width = 110
+          end>
       end
     end
     object ProtocolTab: TTabSheet

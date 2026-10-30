@@ -57,6 +57,11 @@ type
     UploadUnconfirmed: Boolean;
   end;
 
+  TMiniAppInboxInfo = record
+    SellerName, ReceivedAt, DocumentFormat: string;
+    HasMetadata, EN16931Compliant: Boolean;
+  end;
+
   TMiniAppTokens = record
     AccessToken: string;
     RefreshToken: string;
@@ -98,6 +103,17 @@ procedure SaveOutbox(const AInvoiceNumber: string; const AState: TMiniAppOutboxS
 function OutboxStatusRank(const AStatus: string): Integer;
 function OutboxDetails(const AState: TMiniAppOutboxState): string;
 procedure ArchiveOutboxOriginal(const AInvoiceNumber: string; AZipStream: TStream);
+
+// Vor jedem Inbox-Ablauf die persistente Bindung prüfen; nur ein Worker schreibt.
+procedure EnsureInboxContext(AEnvironment: TMiniAppEnvironment; const ATraffiqxID: string);
+// Nur der eine Netzwerk-Worker verändert die Offen-Liste.
+function LoadPendingInbox: TArray<string>;
+procedure MarkInboxPending(const ADocumentID: string; APending: Boolean);
+function InboxDocumentStored(const ADocumentID: string): Boolean;
+procedure ArchiveInboxDocument(const ADocumentID: string; AZipStream: TStream);
+function LoadInboxInfo(const ADocumentID: string): TMiniAppInboxInfo;
+procedure SaveInboxMetadata(const ADocumentID, AJson: string);
+function FirstInboxFile(const ADocumentID: string): string;
 
 implementation
 
@@ -653,13 +669,13 @@ begin
   end;
 end;
 
-procedure ArchiveOutboxOriginal(const AInvoiceNumber: string; AZipStream: TStream);
+procedure ArchiveZip(const ADirectory: string; AZipStream: TStream; AInbox: Boolean);
 var
   LZip: TZipFile;
   LContents: TArray<TBytes>;
   LNames: TArray<string>;
   LName, LDirectory, LStage, LPath: string;
-  LExisting: TBytes;
+  LExisting, LMarker: TBytes;
   LFile: TFileStream;
   LGuid: TGUID;
   I, J, LCount: Integer;
@@ -710,9 +726,11 @@ begin
   finally
     LZip.Free;
   end;
-  LDirectory := TPath.Combine(InvoiceDirectory(AInvoiceNumber), 'original');
+  LDirectory := ADirectory;
   if DirectoryExists(LDirectory) then
   begin
+    if AInbox then
+      raise EInOutError.Create('Vorhandene Eingangsablage ist unvollständig; manuell prüfen.');
     // Absturz nach Veröffentlichung, vor archived_at: identische Ablage übernehmen.
     if (GetFileAttributes(PChar(LDirectory)) and FILE_ATTRIBUTE_REPARSE_POINT) <> 0 then
       raise EInOutError.Create('Originalordner darf keine Verknüpfung sein.');
@@ -746,8 +764,220 @@ begin
       LFile.Free;
     end;
   end;
+  if AInbox then
+  begin
+    // Noch unveröffentlicht: direkt schreiben und spülen. Keine zweite Temp-Datei
+    // mit zusätzlicher GUID (unnötig und bei langen Datenpfaden zu lang).
+    LMarker := TEncoding.UTF8.GetBytes(string.Join(sLineBreak, Copy(LNames, 0, LCount)));
+    LFile := TFileStream.Create(TPath.Combine(LStage, 'archive.complete'), fmCreate);
+    try
+      LFile.WriteBuffer(LMarker[0], Length(LMarker));
+      if not FlushFileBuffers(LFile.Handle) then RaiseLastOSError;
+    finally
+      LFile.Free;
+    end;
+  end;
   if not MoveFileEx(PChar(LStage), PChar(LDirectory), MOVEFILE_WRITE_THROUGH) then
     RaiseLastOSError;
+end;
+
+
+procedure ArchiveOutboxOriginal(const AInvoiceNumber: string; AZipStream: TStream);
+begin
+  ArchiveZip(TPath.Combine(InvoiceDirectory(AInvoiceNumber), 'original'), AZipStream, False);
+end;
+
+function PathPresent(const APath: string): Boolean;
+var
+  LAttributes, LError: DWORD;
+begin
+  LAttributes := GetFileAttributes(PChar(APath));
+  if LAttributes <> INVALID_FILE_ATTRIBUTES then Exit(True);
+  LError := GetLastError;
+  if (LError = ERROR_FILE_NOT_FOUND) or (LError = ERROR_PATH_NOT_FOUND) then Exit(False);
+  RaiseLastOSError(LError);
+end;
+
+procedure EnsureInboxContext(AEnvironment: TMiniAppEnvironment; const ATraffiqxID: string);
+var
+  LPath, LEnvironment: string;
+  LJson: TJSONObject;
+begin
+  if Trim(ATraffiqxID) = '' then
+    raise EArgumentException.Create('TRAFFIQX-ID für den Posteingang fehlt.');
+  if AEnvironment = meSandbox then LEnvironment := 'sandbox'
+  else LEnvironment := 'production';
+  LPath := TPath.Combine(DataDirectory, 'eingang-kontext.json');
+  if PathPresent(LPath) then
+  begin
+    LJson := ReadJsonObject(LPath);
+    try
+      if (ReadJsonText(LJson, 'format') <> 'MiniApp.InboxContext.v1') or
+        (ReadJsonText(LJson, 'environment') <> LEnvironment) or
+        (ReadJsonText(LJson, 'traffiqx_id') <> ATraffiqxID) then
+        raise EInvalidOperation.Create('Der lokale Posteingang gehört zu einer anderen ' +
+          'Umgebung/TRAFFIQX-ID oder hat ein unbekanntes Kontextformat. ' +
+          'Ursprüngliche Konfiguration wiederherstellen; die Offen-Liste bleibt unverändert.');
+    finally
+      LJson.Free;
+    end;
+    Exit;
+  end;
+  // Altbestände niemals still der gerade aktiven Verbindung zuschlagen.
+  // Auch fertige Dokumente binden: sonst würden fremde IDs/Metadaten vermischt.
+  if Length(LoadPendingInbox) > 0 then
+    raise EInvalidOperation.Create('Offene Eingangsdokumente ohne Kontextbindung. ' +
+      'Ursprüngliche Zuordnung manuell prüfen; siehe README, Bekannte Grenzen.');
+  if PathPresent(IncomingDirectory) then
+    if Length(TDirectory.GetFileSystemEntries(IncomingDirectory)) > 0 then
+      raise EInvalidOperation.Create('Vorhandener Posteingang ohne Kontextbindung. ' +
+        'Ursprüngliche Zuordnung manuell prüfen; siehe README, Bekannte Grenzen.');
+  LJson := TJSONObject.Create;
+  try
+    LJson.AddPair('format', 'MiniApp.InboxContext.v1');
+    LJson.AddPair('environment', LEnvironment);
+    LJson.AddPair('traffiqx_id', ATraffiqxID);
+    // Vor Listenabruf, Download oder Metadaten atomar persistieren.
+    AtomicWriteText(LPath, LJson.ToJSON);
+  finally
+    LJson.Free;
+  end;
+end;
+
+function LoadPendingInbox: TArray<string>;
+var
+  LList: TStringList;
+  LID: string;
+begin
+  Result := nil;
+  if not PathPresent(PendingInboxPath) then Exit;
+  LList := TStringList.Create;
+  try
+    LList.LoadFromFile(PendingInboxPath, TEncoding.UTF8);
+    // Beschädigte Listen niemals als leer behandeln oder still überschreiben.
+    for LID in LList do
+      IncomingDocumentDirectory(LID);
+    Result := LList.ToStringArray;
+  finally
+    LList.Free;
+  end;
+end;
+
+procedure MarkInboxPending(const ADocumentID: string; APending: Boolean);
+var
+  LList: TStringList;
+  LID: string;
+  LIndex: Integer;
+begin
+  IncomingDocumentDirectory(ADocumentID);
+  LList := TStringList.Create;
+  try
+    LList.CaseSensitive := True;
+    for LID in LoadPendingInbox do
+      if LList.IndexOf(LID) < 0 then LList.Add(LID);
+    LIndex := LList.IndexOf(ADocumentID);
+    if APending then
+    begin
+      if LIndex >= 0 then Exit;
+      LList.Add(ADocumentID);
+    end
+    else
+    begin
+      if LIndex < 0 then Exit;
+      LList.Delete(LIndex);
+    end;
+    AtomicWriteText(PendingInboxPath, LList.Text);
+  finally
+    LList.Free;
+  end;
+end;
+
+function InboxFiles(const ADocumentID: string): TArray<string>;
+var
+  LDirectory, LName, LPath: string;
+  LList: TStringList;
+  LAttributes: DWORD;
+  I: Integer;
+begin
+  Result := nil;
+  LDirectory := IncomingDocumentDirectory(ADocumentID);
+  if not PathPresent(LDirectory) then Exit;
+  LAttributes := GetFileAttributes(PChar(LDirectory));
+  if ((LAttributes and FILE_ATTRIBUTE_REPARSE_POINT) <> 0) or
+    ((LAttributes and FILE_ATTRIBUTE_DIRECTORY) = 0) then
+    raise EInOutError.Create('Eingangsordner ist keine reguläre Ablage.');
+  LList := TStringList.Create;
+  try
+    // Fehlender/unlesbarer Marker bedeutet unvollständig, niemals erfolgreich.
+    LList.LoadFromFile(TPath.Combine(LDirectory, 'archive.complete'), TEncoding.UTF8);
+    if LList.Count = 0 then raise EReadError.Create('Eingangsablage enthält keine Dokumentdateien.');
+    SetLength(Result, LList.Count);
+    for I := 0 to LList.Count - 1 do
+    begin
+      LName := LList[I];
+      LPath := SafeChildDirectory(LDirectory, LName);
+      if (LName = 'archive.complete') or (LName = 'metadata.json') then
+        raise EReadError.Create('Ungültige Dateiliste der Eingangsablage.');
+      LAttributes := GetFileAttributes(PChar(LPath));
+      if (LAttributes = INVALID_FILE_ATTRIBUTES) or
+        ((LAttributes and (FILE_ATTRIBUTE_REPARSE_POINT or FILE_ATTRIBUTE_DIRECTORY)) <> 0) then
+        raise EReadError.Create('Dokumentdatei fehlt oder ist eine Verknüpfung.');
+      Result[I] := LPath;
+    end;
+  finally
+    LList.Free;
+  end;
+end;
+
+function InboxDocumentStored(const ADocumentID: string): Boolean;
+begin
+  Result := Length(InboxFiles(ADocumentID)) > 0;
+end;
+
+function FirstInboxFile(const ADocumentID: string): string;
+var
+  LFiles: TArray<string>;
+begin
+  LFiles := InboxFiles(ADocumentID);
+  if Length(LFiles) = 0 then raise EReadError.Create('Eingangsdokument ist noch nicht abgelegt.');
+  Result := LFiles[0];
+end;
+
+procedure ArchiveInboxDocument(const ADocumentID: string; AZipStream: TStream);
+begin
+  if InboxDocumentStored(ADocumentID) then Exit;
+  ArchiveZip(IncomingDocumentDirectory(ADocumentID), AZipStream, True);
+end;
+
+function LoadInboxInfo(const ADocumentID: string): TMiniAppInboxInfo;
+var
+  LJson: TJSONObject;
+  LPath: string;
+  LValue: TJSONValue;
+begin
+  Result := Default(TMiniAppInboxInfo);
+  LPath := TPath.Combine(IncomingDocumentDirectory(ADocumentID), 'metadata.json');
+  if not PathPresent(LPath) then Exit;
+  LJson := ReadJsonObject(LPath);
+  try
+    Result.SellerName := ReadJsonText(LJson, 'seller_name');
+    Result.ReceivedAt := ReadJsonText(LJson, 'date_of_receipt');
+    Result.DocumentFormat := ReadJsonText(LJson, 'document_format');
+    LValue := LJson.GetValue('en_16931_compliant');
+    if not (LValue is TJSONBool) or (Result.DocumentFormat = '') then
+      raise EConvertError.Create('Validierungsstatus oder Dokumentformat fehlt.');
+    Result.EN16931Compliant := LValue.Value = 'true';
+    Result.HasMetadata := True;
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure SaveInboxMetadata(const ADocumentID, AJson: string);
+begin
+  if not InboxDocumentStored(ADocumentID) then
+    raise EReadError.Create('Metadaten benötigen eine vollständige Dokumentablage.');
+  AtomicWriteText(TPath.Combine(IncomingDocumentDirectory(ADocumentID), 'metadata.json'), AJson);
 end;
 
 end.

@@ -1,11 +1,13 @@
-﻿# TIA Mini-Anwendung – Scheiben S1 bis S5
+﻿# TIA Mini-Anwendung – Scheiben S1 bis S6
 
 Eigenständiges VCL-Projekt `TIAMiniApp.dproj` für Win32/Win64, jeweils Debug/Release.
 Der Umfang folgt [`Sample2.md`](../../../Sample2.md): Stammdaten, JSON-Ablage und
 Fenstergerüst, lokale XRechnung-Erzeugung, DATEV-Verbindung und Versand bis zum
-abgelegten Original. Der Eingang folgt in S6, die erweiterte Protokollauswertung in S7.
+abgelegten Original sowie Posteingang mit Wiederaufnahme. Die erweiterte
+Protokollauswertung folgt in S7.
 S3 führt Anmeldung, Check, Userinfo, Refresh und Widerruf aus; S4/S5 ergänzen Upload,
-Status, Versandmetadaten und Originaldownload.
+Status, Versandmetadaten und Originaldownload. S6 ergänzt den manuellen
+Posteingangsabruf, Erstabgleich und die Gültigkeitsanzeige.
 
 ## Start und Bedienung
 
@@ -34,7 +36,7 @@ Bank- und Steuerkennungen und sind keine versandfertige Rechnungsvorlage.
 `MiniApp.Storage` liefert Pfade unter `Daten` neben der EXE. Beim Start werden
 `Daten`, `ausgang`, `eingang` und `httplog` angelegt. `InvoiceDirectory` und
 `IncomingDocumentDirectory` liefern sichere Unterpfade ohne sie anzulegen.
-`tokens.dat` enthält ab S3 die geschützten Tokens; `eingang-offen.txt` ist für S6 vorgesehen.
+`tokens.dat` enthält ab S3 die geschützten Tokens; `eingang-offen.txt` sichert ab S6 ausstehende Downloads.
 Jede Build-Konfiguration hat damit ihren eigenen Datenbestand.
 
 Fehlt `stammdaten.json`, erzeugt `TMiniAppData.LoadFromFile` vier Kunden, zwei
@@ -116,7 +118,7 @@ versucht den Widerruf erneut, auch nach einem Neustart. **Verbundene Anwendungen
 
 `TMiniAppService` verwendet seine Verbindungs-API ausschließlich im Hauptthread.
 Die synchronen Verbindungsabläufe zeigen eine Sanduhr; Netzstörungen können die
-Oberfläche bis zum HTTP-Timeout blockieren. Versand/Status laufen dagegen in
+Oberfläche bis zum HTTP-Timeout blockieren. Versand/Status und Posteingang laufen in
 `TTask.Run` mit einer eigenen API (siehe S4/S5 unten). Abschluss- und Anzeige-Callbacks
 warten nicht auf Threads und rufen weder `ProcessMessages` noch `CheckSynchronize` auf. Nur das Ereignis
 `OnConfirmLoginUnconfirmed` darf vor einem neuen Login ohne laufendes Polling eine
@@ -166,6 +168,21 @@ Dialoge geöffnet.
 
 ## Bekannte Grenzen
 
+- Ein lokaler Eingangsbestand gehört dauerhaft zu genau einer Umgebung und
+  TRAFFIQX-ID (`eingang-kontext.json`); auch nach Trennen und leerer Offen-Liste
+  wird er nicht automatisch umgebunden. Für andere Kombinationen getrennte
+  Programmkopien mit eigenem `Daten`-Ordner verwenden. Die lokale Eingangsliste
+  bleibt bei einem Verbindungswechsel sichtbar; Netzwerkaktionen für diesen
+  Bestand brechen bei abweichender Bindung ab.
+- Ältere Eingangsbestände ohne Kontextdatei werden nicht automatisch zugeordnet.
+  Vor der Übernahme Anwendung schließen, `Daten` sichern und die ursprüngliche
+  Umgebung sowie TRAFFIQX-ID anhand der bisherigen Konfiguration/HTTP-Protokolle
+  prüfen. Nur bei eindeutig einheitlicher Herkunft `Daten/eingang-kontext.json`
+  als UTF-8-JSON mit `format="MiniApp.InboxContext.v1"`,
+  `environment="sandbox"` oder `"production"` und `traffiqx_id` als JSON-Textfeld
+  mit der ursprünglichen ID anlegen. Unklare/gemischte Bestände zunächst manuell
+  zuordnen; Vormerkungen nicht löschen, um die Sperre zu umgehen. Defekte oder
+  verlorene Kontextdateien aus der passenden Sicherung wiederherstellen.
 - Eine abgebrochene Anmeldung kann bei DATEV trotzdem eine Verbindung erzeugt
   haben, deren Tokens lokal unbekannt sind. Der gelbe Status und die Rückfrage
   vor einem neuen Login ersetzen keinen Widerruf: offene Browser-Anmeldung schließen
@@ -331,6 +348,67 @@ Der Reiter nennt den Archivierungsort ausdrücklich:
 E-Rechnungsplattform archiviert nicht.“ Die lokale Sample-Ablage ersetzt kein
 Archivsystem mit Unveränderbarkeit, Aufbewahrung und Sicherung; diese Maßnahmen
 bleiben Aufgabe der integrierenden Anwendung.
+
+## Posteingang (S6)
+
+Nach geprüftem DATEV-Login im Reiter **Eingang** zunächst **Alle abgleichen** wählen.
+Dieser Erstabgleich liest die Liste mit `AUseDownloadedFilter=False`, einschließlich
+bereits bei DATEV heruntergeladener Dokumente. **Posteingang abrufen** verwendet
+anschließend `AUseDownloadedFilter=True, ADownloaded=False`. Beide Aktionen sind
+manuell; weder der Timer noch das Öffnen des Reiters startet Netzwerkaufrufe.
+Die Liste zeigt auch nach einem Neustart lokale Dokumente und vorgemerkte IDs.
+
+Vor dem Worker erneuert `EnsureAccessToken(120)` bei Bedarf die Tokens im
+Hauptthread. Der Worker besitzt eine eigene API ohne Refresh-Token. Vor jedem
+weiteren API-Aufruf werden mindestens 15 Sekunden Restlaufzeit verlangt; reicht
+sie nicht, den Abruf erneut starten. Es läuft immer nur ein Netzwerkvorgang;
+Queue-Ziel, Fehlerhilfe und Schließen verwenden denselben Lebenszyklus wie S4/S5.
+
+Vor jedem Abruf, Erstabgleich und Nachholen von Metadaten prüft der Worker
+`eingang-kontext.json` auf Umgebung und TRAFFIQX-ID. Bei einem leeren neuen
+Bestand wird diese Bindung vor dem ersten Inbox-Aufruf atomar gespeichert.
+Eine fremde, unlesbare oder ungültige Bindung sperrt alle Inbox-Aufrufe und
+Änderungen der Offen-Liste. Trennen, Umgebungswechsel oder eine andere `.env`
+nach Neustart können deshalb keine fremde Vormerkung durch HTTP 404 entfernen.
+Für Bestände ohne Bindung siehe **Bekannte Grenzen**.
+
+Der Wiederanlauf verarbeitet **zuerst** `eingang-offen.txt`, erst danach die
+API-Liste. Jede neue ID wird vor dem Download atomar mit Flush gespeichert.
+Ohne erfolgreiche Vormerkung erfolgt kein Download. Das ZIP wird vollständig
+inklusive CRC-Prüfung in den Speicher gelesen (maximal 256 MiB entpackt).
+Die mit S5 gemeinsame Ablage bereinigt Dateinamen, flacht Unterordner ab und
+stellt eindeutige Nummern voran. Erst nach vollständigem Schreiben und Flush
+wird ein temporärer Nachbarordner als `eingang/<document_id>` veröffentlicht.
+`archive.complete` enthält die Liste der veröffentlichten Dokumentdateien;
+`metadata.json` wird anschließend atomar gespeichert. Beide Verwaltungsdateien
+kollidieren dank der nummerierten ZIP-Dateinamen nicht mit Dokumenten.
+
+Erst danach wird die ID ausgetragen. Fehler beim Download, Entpacken oder
+Schreiben lassen sie für den nächsten Abruf vorgemerkt; HTTP 404 beim Download
+entfernt sie mit einem Protokollhinweis. Ein Absturz nach Veröffentlichung wird
+anhand von `archive.complete` und den vorhandenen Dateien erkannt: kein erneuter
+Download und keine doppelte Ablage. **Alle abgleichen** überspringt solche lokalen
+Dokumente ebenfalls und ergänzt gegebenenfalls fehlende Metadaten. Temporäre
+`<document_id>.<GUID>.tmp`-Ordner bleiben bei Fehlern zur Diagnose erhalten, erscheinen
+aber nicht als Dokumente. Vorhandene Ordner mit fehlendem Marker oder fehlenden
+Dateien werden nicht überschrieben; diese Bestände manuell prüfen und sichern.
+Eine unlesbare Offen-Liste bricht den Abruf ab und wird nicht ersetzt.
+
+Metadatenfehler werden als Warnung gemeldet; das Dokument bleibt vollständig
+abgelegt und wird aus der Offen-Liste entfernt. **Metadaten nachholen** fragt nur
+die Metadaten des ausgewählten lokalen Dokuments erneut ab. Absender, Eingang,
+`document_format` und `en_16931_compliant` erscheinen in der Liste. Fehlende oder
+unlesbare Metadaten bleiben **ungeprüft**, gültige stehen auf **ja**, ungültige auf
+**nein** in Rot. Ein roter Sammelhinweis nach dem Abruf meldet die Anzahl ungültiger
+E-Rechnungen; das Ergebnis steht zusätzlich im Protokoll. Beim erneuten Abgleich
+zählen auch bereits bekannte ungültige Dokumente zu diesem Hinweis.
+
+**Dokument anzeigen** öffnet die erste Datei in ZIP-Reihenfolge im zugeordneten
+Standardprogramm; **Ordner öffnen** zeigt alle Dateien. Beides funktioniert auch
+ohne DATEV-Verbindung. Die Oberfläche nennt den Archivierungsort ausdrücklich:
+„Die Eingangsrechnungen liegen im Ordner Daten\eingang; die DATEV
+E-Rechnungsplattform archiviert nicht GoBD-konform.“ Die Sample-Ablage allein
+ersetzt kein GoBD-Archiv mit Unveränderbarkeit, Aufbewahrung und Sicherung.
 
 ## Optionale KoSIT-Prüfung
 
@@ -500,3 +578,66 @@ Fehlerantworten gegebenenfalls mit einer kontrollierten Test-API simulieren:
 12. Bei 100/150/200 Prozent DPI und minimaler Fenstergröße: neue Knöpfe erreichbar,
     Ausgangsliste horizontal scrollbar, Detailbereich scrollbar/teilbar, Hinweis
     zur Archivierung sichtbar. „Original anzeigen“ öffnet die vollständige Ablage.
+
+### Prüfliste S6
+
+In einem separaten Testbestand und mit Sandbox bzw. kontrollierten API-Antworten:
+
+1. **Alle abgleichen** liefert heruntergeladene und neue Dokumente, **Posteingang
+   abrufen** nur neue. Zweiter Abgleich legt vorhandene Ordner nicht doppelt an.
+   Im HTTP-Protokoll Reihenfolge prüfen: vorgemerkte Downloads vor dem Listenabruf.
+2. Vor dem Download `eingang-offen.txt` prüfen. Schreibrechte verweigern: kein
+   Download ohne Vormerkung. Download-/ZIP-/Schreibfehler und Neustart simulieren:
+   ID bleibt erhalten und wird trotz DATEV-Downloadflag erneut verarbeitet.
+3. Abbruch nach Ordnerveröffentlichung, vor Metadaten/Austragen: beim Neustart
+   lokale Dateien übernehmen, Metadaten ergänzen, ID austragen, kein Doppeldownload.
+   HTTP 404 beim Download entfernt nur die betroffene Vormerkung. Defekte oder
+   gesperrte Offen-Liste darf nicht durch eine neue Liste ersetzt werden.
+4. ZIP mit Unterordnern, Pfadtraversal, ungültigen/gleichen Namen und Gerätenamen:
+   alle Dateien nur unter der ID ablegen. Leeres ZIP, CRC-Fehler, defektes ZIP,
+   Größenlimit und Schreibfehler: keine veröffentlichte Teilablage. Vorhandene
+   unvollständige Ordner bleiben unverändert und verlangen manuelle Prüfung.
+5. Metadatenfehler: Warnung, Dokument weiter sichtbar/öffnbar, ID ausgetragen,
+   Gültigkeit **ungeprüft**. **Metadaten nachholen** ergänzt Format, Absender,
+   Empfangsdatum und Gültigkeit ohne erneuten Dokumentdownload.
+6. Gültige und ungültige Rechnungen gemeinsam abrufen: ja/nein korrekt, ungültige
+   Zeilen rot, roter Sammelhinweis mit Anzahl auch bei gemischten Teilerfolgen.
+   Nach Neustart bleibt die Gültigkeit sichtbar; beim Abgleich erneut melden.
+7. **Dokument anzeigen** öffnet die erste Dokumentdatei, **Ordner öffnen** alle
+   Dateien; auch ohne Verbindung. ID und Archivierungshinweis bleiben sichtbar.
+8. Während des Abrufs bleiben andere Netzwerkaktionen und Umgebungswechsel
+   gesperrt. Tokenablauf im langen Stapel, Schließen mit wartendem Worker und
+   eingereihten Ergebnissen sowie 100/150/200 Prozent DPI prüfen. Kein Abruf
+   durch Timer, Neustart oder bloßes Öffnen des Reiters.
+
+9. Download erfolgreich, lokale Ablage fehlgeschlagen: Verbindung trennen,
+   Umgebung wechseln und abrufen. Kein Inbox-Aufruf, Vormerkung unverändert.
+   Zur ursprünglichen Umgebung zurückkehren: Wiederaufnahme weiterhin möglich.
+   Dasselbe nach Neustart mit anderer TRAFFIQX-ID in `.env` prüfen, auch für
+   **Alle abgleichen** und **Metadaten nachholen**. Fehlende/defekte/gesperrte
+   Kontextdatei bei vorhandenem Bestand darf keine automatische Neubindung
+   auslösen; Schreibfehler beim ersten Anlegen verhindert jeden Inbox-Aufruf.
+
+DATEV-, interaktive VCL-/DPI-Prüfungen und weitere Build-Konfigurationen bleiben
+für S6 offen; die Prüfliste beschreibt die noch auszuführende Integrationsabnahme.
+
+S6-Prüfung am 30.10.2026: Win32 Debug mit dem vorgegebenen Build-Befehl erfolgreich
+(ExitCode 0), keine neuen Warnungen oder Hinweise in Sample2-Units. Die bekannten
+Umgebungs-/Bibliothekshinweise bleiben bestehen. Isolierte Delphi-Laufzeittests im
+Scratchpad bestanden: atomare Offen-Liste einschließlich Sperr-/Lesefehlern,
+ZIP-Ablage und sichere Dateinamen, Wiederaufnahme ohne doppelte Ablage,
+Metadaten-Rundlauf und Nachholung, fehlende Dateien/unvollständige Ordner sowie
+CRC-/Format-/Größenfehler ohne Veröffentlichung. Die S4/S5-Ablagetests wurden
+gegen die gemeinsame ZIP-Routine erfolgreich wiederholt. Ein Formular-Smoke-Test
+lädt das DFM und prüft Eingangsspalten sowie gesperrte Aktionen ohne Verbindung
+und Auswahl; er ersetzt keine interaktive Sicht-/DPI-Prüfung.
+
+S6-Review-Nacharbeit am 30.10.2026: Den hohen Befund zum Verlust vorgemerkter
+IDs nach Umgebungswechsel am Code bestätigt und durch die persistente Bindung
+an Umgebung/TRAFFIQX-ID behoben. Isolierter Delphi-Laufzeittest: 25 Prüfungen
+erfolgreich, darunter unveränderte Vormerkungen bei Kontextwechsel, Wiederaufnahme
+im ursprünglichen Kontext, defekte/gesperrte Kontextdateien und gesperrte
+Altbestände ohne Zuordnung. Win32 Debug erneut mit dem vorgegebenen Befehl gebaut:
+ExitCode 0, keine neuen Warnungen/Hinweise in Sample2-Units. Das Build-Skript
+meldet weiterhin den nicht verfügbaren HKCU-Umgebungsschlüssel; die vorhandenen
+Umgebungs-/Bibliothekshinweise verhindern den erfolgreichen Build nicht.
