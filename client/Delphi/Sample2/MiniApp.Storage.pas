@@ -24,7 +24,7 @@ unit MiniApp.Storage;
 interface
 
 uses
-  System.SysUtils, MiniApp.Model;
+  System.SysUtils, System.Classes, MiniApp.Model;
 
 type
   TMiniAppClientConfig = record
@@ -45,6 +45,16 @@ type
     IssueDate: string;
     GrossAmount: Currency;
     DeliveryChannel: string;
+  end;
+
+  TMiniAppOutboxState = record
+    DocumentID, Status, ChannelIntended, UploadedAt, CheckedAt: string;
+    DocumentFormat, SendDate, DeliveryChannel, DeliveryAddress: string;
+    ChannelMatches: Boolean;
+    MetadataAt, ArchivedAt, LastError: string;
+    PreviousDocumentIDs: TArray<string>;
+    // Vor dem POST persistieren: auch ein Absturz/Transportfehler sperrt Wiederholung.
+    UploadUnconfirmed: Boolean;
   end;
 
   TMiniAppTokens = record
@@ -83,12 +93,16 @@ function LoadClientConfig: TMiniAppClientConfig;
 function CreateOutboxInvoice(AData: TMiniAppData; const ACustomer: TMiniAppCustomer;
   AIssueDate: TDate; out AReservedInvoiceNumber: string): string;
 function LoadInvoiceInfo(const AInvoiceNumber: string): TMiniAppInvoiceInfo;
-procedure LoadOutboxState(const AInvoiceNumber: string; out ADocumentID, AStatus: string);
+function LoadOutbox(const AInvoiceNumber: string): TMiniAppOutboxState;
+procedure SaveOutbox(const AInvoiceNumber: string; const AState: TMiniAppOutboxState);
+function OutboxStatusRank(const AStatus: string): Integer;
+function OutboxDetails(const AState: TMiniAppOutboxState): string;
+procedure ArchiveOutboxOriginal(const AInvoiceNumber: string; AZipStream: TStream);
 
 implementation
 
 uses
-  Winapi.Windows, System.Classes, System.IOUtils, System.JSON,
+  Winapi.Windows, System.IOUtils, System.JSON, System.Zip, System.ZLib,
   intf.Invoice, MiniApp.InvoiceBuilder, intf.TRAFFIQXTokenProtection;
 
 function DataDirectory: string;
@@ -308,8 +322,31 @@ end;
 function ReadJsonObject(const AFileName: string): TJSONObject;
 var
   LValue: TJSONValue;
+  LHandle: THandle;
+  LStream: THandleStream;
+  LReader: TStreamReader;
 begin
-  LValue := TJSONObject.ParseJSONValue(TFile.ReadAllText(AFileName, TEncoding.UTF8));
+  // UI und Worker lesen parallel. FILE_SHARE_DELETE erlaubt den atomaren
+  // Austausch von outbox.json auch während die alte Version gelesen wird.
+  LHandle := CreateFile(PChar(AFileName), GENERIC_READ,
+    FILE_SHARE_READ or FILE_SHARE_WRITE or FILE_SHARE_DELETE, nil, OPEN_EXISTING,
+    FILE_ATTRIBUTE_NORMAL, 0);
+  if LHandle = INVALID_HANDLE_VALUE then RaiseLastOSError;
+  try
+    LStream := THandleStream.Create(LHandle);
+    try
+      LReader := TStreamReader.Create(LStream, TEncoding.UTF8, True);
+      try
+        LValue := TJSONObject.ParseJSONValue(LReader.ReadToEnd);
+      finally
+        LReader.Free;
+      end;
+    finally
+      LStream.Free;
+    end;
+  finally
+    CloseHandle(LHandle);
+  end;
   if not (LValue is TJSONObject) then
   begin
     LValue.Free;
@@ -474,23 +511,243 @@ begin
   end;
 end;
 
-procedure LoadOutboxState(const AInvoiceNumber: string; out ADocumentID, AStatus: string);
+function OutboxStatusRank(const AStatus: string): Integer;
+begin
+  if AStatus = 'inProcess' then Exit(0);
+  if AStatus = 'userAction' then Exit(1);
+  if AStatus = 'error' then Exit(2);
+  if AStatus = 'deleted' then Exit(3);
+  if AStatus = 'sent' then Exit(4);
+  Result := -1;
+end;
+
+function LoadOutbox(const AInvoiceNumber: string): TMiniAppOutboxState;
 var
   LPath: string;
   LInfo: TJSONObject;
+  LValue, LItem: TJSONValue;
+  LAttributes, LError: DWORD;
+  I: Integer;
 begin
-  ADocumentID := '';
-  AStatus := '';
+  Result := Default(TMiniAppOutboxState);
   LPath := TPath.Combine(InvoiceDirectory(AInvoiceNumber), 'outbox.json');
-  if not FileExists(LPath) then
-    Exit;
+  // Zugriff verweigert ist keine fehlende Datei und darf keinen Versand erlauben.
+  LAttributes := GetFileAttributes(PChar(LPath));
+  if LAttributes = INVALID_FILE_ATTRIBUTES then
+  begin
+    LError := GetLastError;
+    if (LError = ERROR_FILE_NOT_FOUND) or (LError = ERROR_PATH_NOT_FOUND) then
+      Exit;
+    RaiseLastOSError(LError);
+  end;
   LInfo := ReadJsonObject(LPath);
   try
-    ADocumentID := ReadJsonText(LInfo, 'document_id', True);
-    AStatus := ReadJsonText(LInfo, 'status', True);
+    Result.DocumentID := ReadJsonText(LInfo, 'document_id');
+    Result.Status := ReadJsonText(LInfo, 'status');
+    Result.ChannelIntended := ReadJsonText(LInfo, 'channel_intended', True);
+    Result.UploadedAt := ReadJsonText(LInfo, 'uploaded_at', True);
+    Result.CheckedAt := ReadJsonText(LInfo, 'checked_at', True);
+    Result.DocumentFormat := ReadJsonText(LInfo, 'document_format', True);
+    Result.SendDate := ReadJsonText(LInfo, 'send_date', True);
+    Result.DeliveryChannel := ReadJsonText(LInfo, 'delivery_channel', True);
+    Result.DeliveryAddress := ReadJsonText(LInfo, 'delivery_address', True);
+    Result.MetadataAt := ReadJsonText(LInfo, 'metadata_at', True);
+    Result.ArchivedAt := ReadJsonText(LInfo, 'archived_at', True);
+    Result.LastError := ReadJsonText(LInfo, 'last_error', True);
+    LValue := LInfo.GetValue('channel_matches');
+    if (LValue <> nil) and not (LValue is TJSONBool) and not (LValue is TJSONNull) then
+      raise EConvertError.Create('channel_matches ist ungültig.');
+    Result.ChannelMatches := (LValue is TJSONBool) and (LValue.Value = 'true');
+    LValue := LInfo.GetValue('upload_unconfirmed');
+    if (LValue <> nil) and not (LValue is TJSONBool) then
+      raise EConvertError.Create('upload_unconfirmed ist ungültig.');
+    Result.UploadUnconfirmed := (LValue is TJSONBool) and (LValue.Value = 'true');
+    // Auch ältere #PARSE-Marker ohne Zusatzfeld blockieren einen erneuten Upload.
+    if (LValue = nil) and (Result.DocumentID = '') and (Result.LastError <> '') then
+      Result.UploadUnconfirmed := True;
+    LValue := LInfo.GetValue('previous_document_ids');
+    if LValue <> nil then
+    begin
+      if not (LValue is TJSONArray) then
+        raise EConvertError.Create('previous_document_ids ist ungültig.');
+      SetLength(Result.PreviousDocumentIDs, TJSONArray(LValue).Count);
+      I := 0;
+      for LItem in TJSONArray(LValue) do
+      begin
+        if not (LItem is TJSONString) then
+          raise EConvertError.Create('Frühere document_id ist ungültig.');
+        Result.PreviousDocumentIDs[I] := LItem.Value;
+        Inc(I);
+      end;
+    end;
   finally
     LInfo.Free;
   end;
+end;
+
+function OutboxJson(const AState: TMiniAppOutboxState): TJSONObject;
+var
+  LIDs: TJSONArray;
+  LID: string;
+begin
+  Result := TJSONObject.Create;
+  try
+    Result.AddPair('document_id', AState.DocumentID);
+    Result.AddPair('status', AState.Status);
+    Result.AddPair('channel_intended', AState.ChannelIntended);
+    Result.AddPair('uploaded_at', AState.UploadedAt);
+    Result.AddPair('checked_at', AState.CheckedAt);
+    Result.AddPair('document_format', AState.DocumentFormat);
+    Result.AddPair('send_date', AState.SendDate);
+    Result.AddPair('delivery_channel', AState.DeliveryChannel);
+    Result.AddPair('delivery_address', AState.DeliveryAddress);
+    if AState.MetadataAt = '' then
+      Result.AddPair('channel_matches', TJSONNull.Create)
+    else
+      Result.AddPair('channel_matches', TJSONBool.Create(AState.ChannelMatches));
+    Result.AddPair('metadata_at', AState.MetadataAt);
+    Result.AddPair('archived_at', AState.ArchivedAt);
+    Result.AddPair('last_error', AState.LastError);
+    Result.AddPair('upload_unconfirmed', TJSONBool.Create(AState.UploadUnconfirmed));
+    LIDs := TJSONArray.Create;
+    Result.AddPair('previous_document_ids', LIDs);
+    for LID in AState.PreviousDocumentIDs do
+      LIDs.Add(LID);
+  except
+    Result.Free;
+    raise;
+  end;
+end;
+
+procedure SaveOutbox(const AInvoiceNumber: string; const AState: TMiniAppOutboxState);
+var
+  LState, LPrevious: TMiniAppOutboxState;
+  LJson: TJSONObject;
+begin
+  LState := AState;
+  LPrevious := LoadOutbox(AInvoiceNumber);
+  // Rang gilt je document_id. Ein bestätigter Neuversand beginnt bei inProcess.
+  if (LState.DocumentID <> '') and (LPrevious.DocumentID = LState.DocumentID) and
+    (OutboxStatusRank(LPrevious.Status) > OutboxStatusRank(LState.Status)) then
+    LState.Status := LPrevious.Status;
+  LJson := OutboxJson(LState);
+  try
+    AtomicWriteText(TPath.Combine(InvoiceDirectory(AInvoiceNumber), 'outbox.json'), LJson.ToJSON);
+  finally
+    LJson.Free;
+  end;
+end;
+
+function OutboxDetails(const AState: TMiniAppOutboxState): string;
+var
+  LJson: TJSONObject;
+  LPair: TJSONPair;
+begin
+  Result := '';
+  LJson := OutboxJson(AState);
+  try
+    for LPair in LJson do
+      Result := Result + LPair.JsonString.Value + ': ' + LPair.JsonValue.ToJSON + sLineBreak;
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure ArchiveOutboxOriginal(const AInvoiceNumber: string; AZipStream: TStream);
+var
+  LZip: TZipFile;
+  LContents: TArray<TBytes>;
+  LNames: TArray<string>;
+  LName, LDirectory, LStage, LPath: string;
+  LExisting: TBytes;
+  LFile: TFileStream;
+  LGuid: TGUID;
+  I, J, LCount: Integer;
+  LTotal: UInt64;
+  LCRC: UInt32;
+begin
+  if (AZipStream = nil) or (AZipStream.Size = 0) then
+    raise EReadError.Create('Das Original-ZIP ist leer.');
+  LZip := TZipFile.Create;
+  try
+    AZipStream.Position := 0;
+    LZip.Open(AZipStream, zmRead);
+    SetLength(LContents, LZip.FileCount);
+    SetLength(LNames, LZip.FileCount);
+    LCount := 0;
+    LTotal := 0;
+    for I := 0 to LZip.FileCount - 1 do
+    begin
+      LName := StringReplace(LZip.FileNames[I], '/', '\', [rfReplaceAll]);
+      if LName.EndsWith('\') then
+        Continue;
+      // Für das kleine Sample begrenzen wir die entpackte Gesamtgröße auf 256 MiB.
+      if LZip.FileInfo[I].UncompressedSize64 > UInt64(256 * 1024 * 1024) - LTotal then
+        raise EReadError.Create('Original-ZIP überschreitet 256 MiB.');
+      Inc(LTotal, LZip.FileInfo[I].UncompressedSize64);
+      // Alle Einträge vollständig lesen (einschließlich CRC-Prüfung), erst dann schreiben.
+      LZip.Read(I, LContents[LCount]);
+      // System.Zip prüft den lokalen Header. Zusätzlich das zentrale Verzeichnis
+      // abgleichen, auch für leere Dateien und widersprüchliche ZIP-Header.
+      LCRC := crc32(0, nil, 0);
+      if Length(LContents[LCount]) > 0 then
+        LCRC := crc32(LCRC, @LContents[LCount][0], Length(LContents[LCount]));
+      if LCRC <> LZip.FileInfo[I].CRC32 then
+        raise EReadError.Create('CRC-Fehler im Original-ZIP.');
+      LName := ExtractFileName(LName);
+      for J := 1 to Length(LName) do
+        if (Ord(LName[J]) < 32) or CharInSet(LName[J], ['<', '>', ':', '"', '|', '?', '*']) then
+          LName[J] := '_';
+      LName := Copy(LName, 1, 180).TrimRight([' ', '.']);
+      if LName = '' then
+        LName := 'document';
+      // Flache Ablage; Präfix verhindert Geräte-/Doppelnamen auch nach Bereinigung.
+      LNames[LCount] := Format('%.4d-', [LCount + 1]) + LName;
+      Inc(LCount);
+    end;
+    if LCount = 0 then
+      raise EReadError.Create('Original-ZIP enthält keine Dateien.');
+  finally
+    LZip.Free;
+  end;
+  LDirectory := TPath.Combine(InvoiceDirectory(AInvoiceNumber), 'original');
+  if DirectoryExists(LDirectory) then
+  begin
+    // Absturz nach Veröffentlichung, vor archived_at: identische Ablage übernehmen.
+    if (GetFileAttributes(PChar(LDirectory)) and FILE_ATTRIBUTE_REPARSE_POINT) <> 0 then
+      raise EInOutError.Create('Originalordner darf keine Verknüpfung sein.');
+    if Length(TDirectory.GetFileSystemEntries(LDirectory)) <> LCount then
+      raise EInOutError.Create('Vorhandenen Originalordner manuell prüfen; Inhalt weicht ab.');
+    for I := 0 to LCount - 1 do
+    begin
+      LPath := TPath.Combine(LDirectory, LNames[I]);
+      if (GetFileAttributes(PChar(LPath)) and FILE_ATTRIBUTE_REPARSE_POINT) <> 0 then
+        raise EInOutError.Create('Originaldatei fehlt oder ist eine Verknüpfung.');
+      LExisting := TFile.ReadAllBytes(LPath);
+      if Length(LExisting) <> Length(LContents[I]) then
+        raise EInOutError.Create('Vorhandene Originaldatei weicht ab; manuell prüfen.');
+      if (Length(LExisting) > 0) and not CompareMem(@LExisting[0], @LContents[I][0], Length(LExisting)) then
+        raise EInOutError.Create('Vorhandene Originaldatei weicht ab; manuell prüfen.');
+    end;
+    Exit;
+  end;
+  CreateGUID(LGuid);
+  LStage := LDirectory + '.' + GUIDToString(LGuid) + '.tmp';
+  EnsureDirectory(LStage);
+  // Teilablagen bleiben bei Schreibfehlern zur Diagnose erhalten; nie als archiviert markieren.
+  for I := 0 to LCount - 1 do
+  begin
+    LFile := TFileStream.Create(TPath.Combine(LStage, LNames[I]), fmCreate);
+    try
+      if Length(LContents[I]) > 0 then
+        LFile.WriteBuffer(LContents[I][0], Length(LContents[I]));
+      if not FlushFileBuffers(LFile.Handle) then RaiseLastOSError;
+    finally
+      LFile.Free;
+    end;
+  end;
+  if not MoveFileEx(PChar(LStage), PChar(LDirectory), MOVEFILE_WRITE_THROUGH) then
+    RaiseLastOSError;
 end;
 
 end.

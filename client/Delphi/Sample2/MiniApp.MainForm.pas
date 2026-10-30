@@ -159,6 +159,12 @@ type
     ValidateInvoiceButton: TButton;
     RefreshOutgoingButton: TButton;
     OutgoingList: TListView;
+    SendInvoiceButton: TButton;
+    QueryStatusButton: TButton;
+    ShowOriginalButton: TButton;
+    OutgoingConnectionHint: TLabel;
+    OutgoingDetails: TMemo;
+    OutgoingSplitter: TSplitter;
     IncomingTab: TTabSheet;
     IncomingHint: TLabel;
     ProtocolTab: TTabSheet;
@@ -181,6 +187,10 @@ type
     procedure PositionDeleteClick(Sender: TObject);
     procedure PositionApplyClick(Sender: TObject);
     procedure OutgoingShow(Sender: TObject);
+    procedure OutgoingSelected(Sender: TObject; Item: TListItem; Selected: Boolean);
+    procedure SendInvoiceClick(Sender: TObject);
+    procedure QueryStatusClick(Sender: TObject);
+    procedure ShowOriginalClick(Sender: TObject);
     procedure NewInvoiceClick(Sender: TObject);
     procedure ShowXmlClick(Sender: TObject);
     procedure OpenFolderClick(Sender: TObject);
@@ -196,6 +206,10 @@ type
     FClientConfig: TMiniAppClientConfig;
     FService: TMiniAppService;
     FServiceBusy: Boolean;
+    FRefreshingOutgoing: Boolean;
+    FSelectedOutboxValid: Boolean;
+    FSelectedOutbox: TMiniAppOutboxState;
+    FCloseWhenDone: Boolean;
     FPreviousCursor: TCursor;
     FUpdating: Boolean;
     FDirty: Boolean;
@@ -218,6 +232,8 @@ type
     function SaveData: Boolean;
     procedure RefreshOutgoingCustomers;
     procedure RefreshOutgoing;
+    procedure ShowOutgoingDetails;
+    procedure UpdateOutgoingControls;
     function SelectedInvoiceNumber: string;
     procedure OpenLocalPath(const APath: string);
     procedure ValidationError(const AMessage: string);
@@ -225,7 +241,7 @@ type
     function ConfirmLoginUnconfirmed: Boolean;
   public
     destructor Destroy; override;
-    // S3: ausschließlich Hauptthread, auch die Service-Abschlussmeldung.
+    // Ausschließlich Hauptthread; Worker-Meldungen werden vom Service eingereiht.
     procedure Log(const AText: string; AKind: TMiniAppLogKind = lkInfo);
   end;
 
@@ -235,7 +251,7 @@ var
 implementation
 
 uses
-  Vcl.Dialogs, Vcl.Graphics, System.UITypes, System.IOUtils, Winapi.Windows, Winapi.ShellAPI,
+  Vcl.Dialogs, Vcl.Graphics, System.UITypes, System.IOUtils, Winapi.Windows, Winapi.Messages, Winapi.ShellAPI,
   intf.XRechnungValidationHelperJava;
 
 {$R *.dfm}
@@ -295,6 +311,7 @@ begin
       Log(AText, AKind);
     end);
   FService.OnChanged := UpdateConnection;
+  FService.OnOutboxChanged := RefreshOutgoing;
   FService.OnConfirmLoginUnconfirmed := ConfirmLoginUnconfirmed;
   UpdateConnection;
   ValidateInvoiceButton.Enabled := FClientConfig.XRechnungDistributionDir <> '';
@@ -868,13 +885,15 @@ end;
 
 procedure TMiniAppMainForm.RefreshOutgoing;
 var
-  LDirectory, LNumber, LSelected, LDocumentID, LStatus: string;
+  LDirectory, LNumber, LSelected: string;
+  LState: TMiniAppOutboxState;
   LInfo: TMiniAppInvoiceInfo;
   LItem: TListItem;
 begin
   LSelected := '';
   if OutgoingList.Selected <> nil then
     LSelected := OutgoingList.Selected.Caption;
+  FRefreshingOutgoing := True;
   OutgoingList.Items.BeginUpdate;
   try
     OutgoingList.Clear;
@@ -883,6 +902,7 @@ begin
       LNumber := ExtractFileName(LDirectory);
       LItem := OutgoingList.Items.Add;
       LItem.Caption := LNumber;
+      LItem.SubItems.Add('');
       LItem.SubItems.Add('');
       LItem.SubItems.Add('');
       LItem.SubItems.Add('');
@@ -903,18 +923,35 @@ begin
         end;
       end;
       try
-        LoadOutboxState(LNumber, LDocumentID, LStatus);
-        LItem.SubItems[4] := LDocumentID;
-        LItem.SubItems[5] := LStatus;
+        LState := LoadOutbox(LNumber);
+        LItem.SubItems[4] := LState.DocumentID;
+        LItem.SubItems[5] := LState.Status;
+        if LState.UploadUnconfirmed then
+          LItem.SubItems[5] := 'Upload ungeklärt';
+        if LState.ChannelIntended <> '' then
+          LItem.SubItems[3] := LState.ChannelIntended;
+        LItem.SubItems[6] := LState.DeliveryChannel;
+        if (LState.MetadataAt <> '') and not LState.ChannelMatches then
+          LItem.SubItems[6] := LItem.SubItems[6] + ' (abweichend!)';
       except
         on E: Exception do
+        begin
+          LItem.SubItems[5] := 'Ablage nicht lesbar';
           Log(LNumber + ': outbox.json nicht lesbar: ' + E.Message, lkWarning);
+        end;
       end;
       if LNumber = LSelected then
         LItem.Selected := True;
     end;
   finally
     OutgoingList.Items.EndUpdate;
+    FRefreshingOutgoing := False;
+  end;
+  ShowOutgoingDetails;
+  if FCloseWhenDone and (FService <> nil) and not FService.Busy then
+  begin
+    FCloseWhenDone := False;
+    PostMessage(Handle, WM_CLOSE, 0, 0);
   end;
 end;
 
@@ -928,6 +965,121 @@ begin
   except
     on E: Exception do
       Log('Ausgang konnte nicht aktualisiert werden: ' + E.Message, lkError);
+  end;
+end;
+
+procedure TMiniAppMainForm.UpdateOutgoingControls;
+var
+  LIdle, LConnected, LSelected: Boolean;
+begin
+  LIdle := (FService <> nil) and not (FService.Busy or FService.Connecting);
+  LConnected := LIdle and FService.Connected;
+  LSelected := FSelectedOutboxValid and (OutgoingList.Selected <> nil);
+  SendInvoiceButton.Enabled := LConnected and LSelected and
+    not FSelectedOutbox.UploadUnconfirmed and ((FSelectedOutbox.DocumentID = '') or
+    (FSelectedOutbox.Status = 'error') or (FSelectedOutbox.Status = 'deleted'));
+  QueryStatusButton.Enabled := LConnected and LSelected and
+    (FSelectedOutbox.DocumentID <> '') and ((FSelectedOutbox.Status <> 'sent') or
+    (FSelectedOutbox.MetadataAt = '') or (FSelectedOutbox.ArchivedAt = ''));
+  ShowOriginalButton.Enabled := LConnected and LSelected and (FSelectedOutbox.ArchivedAt <> '');
+  NewInvoiceButton.Enabled := LIdle and (OutgoingCustomerCombo.ItemIndex >= 0);
+  ShowXmlButton.Enabled := LIdle and LSelected;
+  OpenFolderButton.Enabled := LIdle and (OutgoingList.Selected <> nil);
+  ValidateInvoiceButton.Enabled := LIdle and LSelected and (FClientConfig.XRechnungDistributionDir <> '');
+  RefreshOutgoingButton.Enabled := LIdle;
+  if (FService <> nil) and FService.Busy then
+    OutgoingConnectionHint.Caption := 'Vorgang läuft. Bitte bis zum Abschluss warten.'
+  else if not LConnected then
+    OutgoingConnectionHint.Caption := 'Ohne geprüfte DATEV-Verbindung sind Senden, Status abfragen und Original anzeigen gesperrt.'
+  else if (OutgoingList.Selected <> nil) and not FSelectedOutboxValid then
+    OutgoingConnectionHint.Caption := 'outbox.json ist nicht lesbar. Versand bleibt gesperrt; Details unten prüfen.'
+  else if LSelected and FSelectedOutbox.UploadUnconfirmed then
+    OutgoingConnectionHint.Caption := 'Upload ungeklärt: NICHT ERNEUT SENDEN. Stand bei DATEV und HTTP-Protokoll prüfen.'
+  else if LSelected and (FSelectedOutbox.DocumentID <> '') and
+    not SendInvoiceButton.Enabled then
+    OutgoingConnectionHint.Caption := 'Bereits übertragen. Fehlende Metadaten oder Original über „Status abfragen“ nachholen.'
+  else
+    OutgoingConnectionHint.Caption := 'Verbunden. Rechnung auswählen und senden oder den Status abfragen.';
+end;
+
+procedure TMiniAppMainForm.ShowOutgoingDetails;
+begin
+  if FRefreshingOutgoing then Exit;
+  FSelectedOutboxValid := False;
+  FSelectedOutbox := Default(TMiniAppOutboxState);
+  OutgoingDetails.Clear;
+  if OutgoingList.Selected <> nil then
+    try
+      FSelectedOutbox := LoadOutbox(SelectedInvoiceNumber);
+      OutgoingDetails.Lines.Text := OutboxDetails(FSelectedOutbox);
+      FSelectedOutboxValid := True;
+    except
+      on E: Exception do
+        OutgoingDetails.Lines.Text := 'outbox.json nicht lesbar; Versand gesperrt: ' + E.Message;
+    end;
+  UpdateOutgoingControls;
+end;
+
+procedure TMiniAppMainForm.OutgoingSelected(Sender: TObject; Item: TListItem; Selected: Boolean);
+begin
+  ShowOutgoingDetails;
+end;
+
+procedure TMiniAppMainForm.SendInvoiceClick(Sender: TObject);
+var
+  LNumber: string;
+  LState: TMiniAppOutboxState;
+  LAllowResend: Boolean;
+begin
+  if (FService = nil) or FService.Busy then Exit;
+  try
+    LNumber := SelectedInvoiceNumber;
+    LState := LoadOutbox(LNumber);
+    if LState.UploadUnconfirmed then
+      raise EInvalidOperation.Create('Upload ungeklärt. Nicht erneut senden; zuerst bei DATEV prüfen.');
+    if (LState.DocumentID <> '') and (LState.Status <> 'error') and (LState.Status <> 'deleted') then
+      raise EInvalidOperation.Create('Bereits übertragen: ' + LState.DocumentID +
+        '. Bitte „Status abfragen“ verwenden.');
+    LAllowResend := LState.DocumentID <> '';
+    if LAllowResend and (MessageDlg('Rechnung ' + LNumber + ' hat den Status ' + LState.Status +
+      ' (document_id=' + LState.DocumentID + '). Wirklich erneut senden? ' +
+      'Die alte ID bleibt in previous_document_ids erhalten.', mtConfirmation,
+      [mbYes, mbNo], 0, mbNo) <> mrYes) then Exit;
+    FService.StartOutbox(LNumber, True, LAllowResend);
+  except
+    on E: Exception do
+    begin
+      Log(E.Message, lkError);
+      MessageDlg(E.Message, mtError, [mbOK], 0);
+    end;
+  end;
+end;
+
+procedure TMiniAppMainForm.QueryStatusClick(Sender: TObject);
+begin
+  if (FService = nil) or FService.Busy then Exit;
+  try
+    FService.StartOutbox(SelectedInvoiceNumber, False);
+  except
+    on E: Exception do
+    begin
+      Log(E.Message, lkError);
+      MessageDlg(E.Message, mtError, [mbOK], 0);
+    end;
+  end;
+end;
+
+procedure TMiniAppMainForm.ShowOriginalClick(Sender: TObject);
+begin
+  try
+    // Ordneransicht zeigt alle Dateitypen unabhängig von den ZIP-Dateinamen.
+    OpenLocalPath(TPath.Combine(InvoiceDirectory(SelectedInvoiceNumber), 'original'));
+  except
+    on E: Exception do
+    begin
+      Log(E.Message, lkError);
+      MessageDlg(E.Message, mtError, [mbOK], 0);
+    end;
   end;
 end;
 
@@ -1074,6 +1226,16 @@ end;
 procedure TMiniAppMainForm.FormCloseQuery(Sender: TObject; var CanClose: Boolean);
 begin
   CanClose := True;
+  if (FService <> nil) and FService.Busy then
+  begin
+    CanClose := False;
+    FCloseWhenDone := MessageDlg('Ein Vorgang läuft. Nach seinem Abschluss automatisch schließen?',
+      mtConfirmation, [mbYes, mbNo], 0, mbNo) = mrYes;
+    // Die Queue kann bereits während der modalen Rückfrage fertig geworden sein.
+    if not FCloseWhenDone or FService.Busy then Exit;
+    FCloseWhenDone := False;
+    CanClose := True;
+  end;
   if FDirty then
     case MessageDlg('Änderungen vor dem Schließen speichern?', mtConfirmation,
       [mbYes, mbNo, mbCancel], 0) of
@@ -1152,6 +1314,7 @@ begin
   // Die URL bleibt Datenwert, kein ungeprüftes Markup im TLinkLabel.
   ConnectionHelpLink.Hint := FService.HelpUrl;
   ProtocolHelpLink.Hint := FService.HelpUrl;
+  UpdateOutgoingControls;
 end;
 
 function TMiniAppMainForm.ConfirmLoginUnconfirmed: Boolean;

@@ -24,7 +24,7 @@ unit MiniApp.Service;
 interface
 
 uses
-  System.SysUtils, MiniApp.Model, MiniApp.Storage, intf.TRAFFIQXInvoiceAPI;
+  System.SysUtils, System.Threading, MiniApp.Model, MiniApp.Storage, intf.TRAFFIQXInvoiceAPI;
 
 type
   TMiniAppLogKind = (lkInfo, lkWarning, lkError);
@@ -32,13 +32,27 @@ type
   TMiniAppChangedEvent = reference to procedure;
   TMiniAppConfirmLoginEvent = reference to function: Boolean;
 
-  // Eine Instanz, ausschließlich im Hauptthread. Callbacks dürfen weder warten
+  TMiniAppService = class;
+
+  // Referenzgezähltes Ziel für Queue-Meldungen. Detach macht bereits eingereihte
+  // Meldungen beim Freigeben wirkungslos; der Worker hält keine Form-Referenz.
+  IMiniAppOutboxSink = interface
+    procedure Entry(const AText: string; AKind: TMiniAppLogKind; const AHelpUrl: string);
+    procedure Changed;
+    procedure Finished;
+    procedure Detach;
+  end;
+
+  // Eine Service-Instanz, ausschließlich im Hauptthread. Callbacks dürfen weder warten
   // noch Nachrichten pumpen. Ausnahme: OnConfirmLoginUnconfirmed wird nur vor
   // einem neuen Login ohne laufendes Polling aufgerufen und darf modal fragen.
-  // S4 muss die Thread-Zuordnung ausdrücklich neu regeln.
+  // Versand/Status besitzen eine eigene API ohne Refresh-Token im Worker.
   TMiniAppService = class
   private
     FApi: TTRAFFIQXInvoiceAPI;
+    FOperation: ITask;
+    FOutboxSink: IMiniAppOutboxSink;
+    FOnOutboxChanged: TMiniAppChangedEvent;
     FConfig: TMiniAppClientConfig;
     FEnvironment: TMiniAppEnvironment;
     FLog: TMiniAppLogEvent;
@@ -84,6 +98,9 @@ type
     function CheckConnection: Boolean;
     function EnsureAccessToken(AMinValidSeconds: Integer): Boolean;
     procedure SetEnvironment(AEnvironment: TMiniAppEnvironment);
+    procedure StartOutbox(const AInvoiceNumber: string; ASend: Boolean;
+      AAllowResend: Boolean = False);
+    property OnOutboxChanged: TMiniAppChangedEvent read FOnOutboxChanged write FOnOutboxChanged;
     property OnChanged: TMiniAppChangedEvent read FOnChanged write FOnChanged;
     property OnConfirmLoginUnconfirmed: TMiniAppConfirmLoginEvent
       read FOnConfirmLoginUnconfirmed write FOnConfirmLoginUnconfirmed;
@@ -105,7 +122,454 @@ type
 implementation
 
 uses
-  System.Classes, System.DateUtils, System.NetEncoding, intf.TRAFFIQXHttpLog;
+  System.Classes, System.DateUtils, System.NetEncoding, System.IOUtils,
+  intf.TRAFFIQXHttpLog;
+
+type
+  TMiniAppOutboxSink = class(TInterfacedObject, IMiniAppOutboxSink)
+  private
+    FOwner: TMiniAppService;
+  public
+    constructor Create(AOwner: TMiniAppService);
+    procedure Entry(const AText: string; AKind: TMiniAppLogKind; const AHelpUrl: string);
+    procedure Changed;
+    procedure Finished;
+    procedure Detach;
+  end;
+
+constructor TMiniAppOutboxSink.Create(AOwner: TMiniAppService);
+begin
+  inherited Create;
+  FOwner := AOwner;
+end;
+
+procedure TMiniAppOutboxSink.Detach;
+begin
+  FOwner := nil;
+end;
+
+procedure TMiniAppOutboxSink.Entry(const AText: string; AKind: TMiniAppLogKind;
+  const AHelpUrl: string);
+begin
+  if FOwner = nil then Exit;
+  FOwner.Log(AText, AKind);
+  if AHelpUrl.StartsWith('https://', True) or AHelpUrl.StartsWith('http://', True) then
+  begin
+    FOwner.FHelpUrl := AHelpUrl;
+    FOwner.Changed;
+  end;
+end;
+
+procedure TMiniAppOutboxSink.Changed;
+begin
+  if (FOwner <> nil) and Assigned(FOwner.FOnOutboxChanged) then
+    FOwner.FOnOutboxChanged();
+end;
+
+procedure TMiniAppOutboxSink.Finished;
+begin
+  if FOwner = nil then Exit;
+  FOwner.SetBusy(False);
+  Changed;
+end;
+
+// Eigener Aufrufrahmen je Meldung: keine veränderliche Schleifenvariable und
+// kein kurzlebiges API-Ergebnisobjekt wird in eine Queue-Closure übernommen.
+procedure QueueOutboxEntry(const ASink: IMiniAppOutboxSink; const AText: string;
+  AKind: TMiniAppLogKind; const AHelpUrl: string = '');
+begin
+  TThread.Queue(nil,
+    procedure
+    begin
+      ASink.Entry(AText, AKind, AHelpUrl);
+    end);
+end;
+
+procedure QueueOutboxChanged(const ASink: IMiniAppOutboxSink);
+begin
+  TThread.Queue(nil,
+    procedure
+    begin
+      ASink.Changed;
+    end);
+end;
+
+function OutboxTimestamp: string;
+begin
+  Result := DateToISO8601(Now, False);
+end;
+
+function SafeOutboxText(AApi: TTRAFFIQXInvoiceAPI; const AText: string): string;
+  procedure Hide(const ASecret: string);
+  begin
+    if ASecret = '' then Exit;
+    Result := StringReplace(Result, ASecret, '[...]', [rfReplaceAll]);
+    Result := StringReplace(Result, TNetEncoding.URL.Encode(ASecret), '[...]',
+      [rfReplaceAll, rfIgnoreCase]);
+  end;
+begin
+  Result := AText;
+  Hide(AApi.AccessToken);
+  Hide(AApi.ClientSecret);
+  Hide(AApi.OAuth2BrokerApiKey);
+  Result := TTRAFFIQXInvoiceAPI.RedactTokenLike(Result);
+end;
+
+procedure ApplyOutboxStatus(AApi: TTRAFFIQXInvoiceAPI; const ASink: IMiniAppOutboxSink;
+  const AInvoiceNumber: string; var LState: TMiniAppOutboxState;
+  AStatus: TTraffiqxInboxDocumentStatusInfo; AElapsedMs: Cardinal);
+var
+  LMessage: string;
+  LKind: TMiniAppLogKind;
+begin
+  if AStatus = nil then
+    raise EConvertError.Create('Statusantwort enthält keinen Status.');
+  LState.CheckedAt := OutboxTimestamp;
+  if OutboxStatusRank(AStatus.Status) >= OutboxStatusRank(LState.Status) then
+    LState.Status := AStatus.Status;
+  LMessage := Format('Status nach %.1f s: %s – %s', [AElapsedMs / 1000,
+    AStatus.Status, TTraffiqxDocumentStatusHelper.DescribeStatus(AStatus.ParsedStatus)]);
+  LKind := lkInfo;
+  if AStatus.Status <> LState.Status then
+    LMessage := LMessage + ' (gespeicherter Status ' + LState.Status + ' bleibt erhalten)';
+  if AStatus.Status = 'userAction' then LKind := lkWarning;
+  if (AStatus.Status = 'error') or (AStatus.Status = 'deleted') or
+    (OutboxStatusRank(AStatus.Status) < 0) then LKind := lkError;
+  if AStatus.ErrorCode <> '' then
+  begin
+    LMessage := LMessage + '; ' + AStatus.ErrorCode + ': ' +
+      TTraffiqxDocumentStatusHelper.DescribeErrorCode(AStatus.ErrorCode);
+    LKind := lkError;
+  end;
+  if AStatus.ErrorDetails <> '' then
+    LMessage := LMessage + '; ' + TTraffiqxDocumentStatusHelper.DescribeErrorDetails(AStatus.ErrorDetails);
+  if LKind <> lkInfo then
+    LState.LastError := SafeOutboxText(AApi, LMessage)
+  else if AStatus.Status = LState.Status then
+    LState.LastError := '';
+  QueueOutboxEntry(ASink, AInvoiceNumber + ': ' + SafeOutboxText(AApi, LMessage), LKind);
+  SaveOutbox(AInvoiceNumber, LState);
+  QueueOutboxChanged(ASink);
+end;
+
+procedure ExecuteOutbox(AApi: TTRAFFIQXInvoiceAPI; const AInvoiceNumber: string;
+  ASend, AAllowResend: Boolean; const ASink: IMiniAppOutboxSink);
+var
+  LState, LPrevious: TMiniAppOutboxState;
+  LInfo: TMiniAppInvoiceInfo;
+  LXml, LPdf: TFileStream;
+  LPrepared, LContent: TMemoryStream;
+  LUploadXml: TStream;
+  LUpload: TTraffiqxUploadResult;
+  LError: TTraffiqxError;
+  LStatus, LPending: TTraffiqxInboxDocumentStatusInfo;
+  LMetadata: TTraffiqxOutboxMetadata;
+  LParams: TTraffiqxDeliveryParamameter;
+  LPreparation: TTraffiqxSandboxPreparation;
+  LScenario, LText, LPath: string;
+  LLoaded, LUploaded: Boolean;
+
+  procedure Report(const AText: string; AKind: TMiniAppLogKind = lkInfo);
+  begin
+    QueueOutboxEntry(ASink, AInvoiceNumber + ': ' + SafeOutboxText(AApi, AText), AKind);
+  end;
+
+  procedure Store;
+  begin
+    SaveOutbox(AInvoiceNumber, LState);
+    QueueOutboxChanged(ASink);
+  end;
+
+  procedure ApiFailure(const AContext: string; AError: TTraffiqxError);
+  begin
+    LState.LastError := SafeOutboxText(AApi, AContext + ': ' + TTraffiqxInboxErrorHelper.ErrorText(AError));
+    QueueOutboxEntry(ASink, AInvoiceNumber + ': ' + LState.LastError, lkError,
+      SafeOutboxText(AApi, TTraffiqxInboxErrorHelper.HelpUrl(AError)));
+    Store;
+  end;
+
+  procedure RequireTokenTime(AMinSeconds: Integer);
+  begin
+    // Der Upload kann lange dauern. Im Worker niemals das Single-Use-Token erneuern.
+    if AApi.AccessTokenExpiresAt <= IncSecond(Now, AMinSeconds) then
+      raise EInvalidOperation.Create('Access-Token reicht für den nächsten Schritt nicht mehr. ' +
+        'Später „Status abfragen“ wählen; nicht erneut senden.');
+  end;
+
+begin
+  LLoaded := False;
+  LXml := nil;
+  LPdf := nil;
+  LPrepared := nil;
+  LContent := nil;
+  LUpload := nil;
+  LError := nil;
+  LStatus := nil;
+  LPending := nil;
+  LMetadata := nil;
+  try
+    try
+      LState := LoadOutbox(AInvoiceNumber);
+      LLoaded := True;
+      if ASend then
+      begin
+        if LState.UploadUnconfirmed then
+        begin
+          Report('Upload ist ungeklärt. Nicht erneut senden; Stand bei DATEV und HTTP-Protokoll prüfen.', lkError);
+          Exit;
+        end;
+        if LState.DocumentID <> '' then
+        begin
+          if (LState.Status <> 'error') and (LState.Status <> 'deleted') then
+          begin
+            Report('Bereits übertragen: ' + LState.DocumentID + ' (' + LState.Status +
+              '). Bitte „Status abfragen“ verwenden.', lkWarning);
+            Exit;
+          end;
+          if not AAllowResend then
+          begin
+            Report('Erneuter Versand nach error/deleted braucht eine ausdrückliche Bestätigung.', lkWarning);
+            Exit;
+          end;
+        end;
+        LInfo := LoadInvoiceInfo(AInvoiceNumber);
+        LPath := InvoiceDirectory(AInvoiceNumber);
+        LXml := TFileStream.Create(TPath.Combine(LPath, 'rechnung.xml'), fmOpenRead or fmShareDenyWrite);
+        LPdf := TFileStream.Create(TPath.Combine(LPath, 'belegbild.pdf'), fmOpenRead or fmShareDenyWrite);
+        LUploadXml := LXml;
+        if AApi.Environment = teSandbox then
+        begin
+          if LInfo.DeliveryChannel = 'peppol' then LScenario := 'SBSZ:210'
+          else LScenario := 'SBSZ:110';
+          LPrepared := TTRAFFIQXInvoiceAPI.PrepareSandboxXml(LXml, LScenario, LPreparation);
+          if LPreparation.ProfileIdMissing then
+            raise EConvertError.Create('Sandbox: cbc:ProfileID fehlt; kein Upload.');
+          if LPrepared <> nil then LUploadXml := LPrepared;
+          Report('Sandbox-Kopie mit ' + LScenario + '; rechnung.xml bleibt unverändert.');
+        end;
+        LUploadXml.Position := 0;
+        if (LUploadXml.Size = 0) or (LPdf.Size = 0) then
+          raise EReadError.Create('XML oder Belegbild ist leer; kein Upload.');
+        RequireTokenTime(75);
+        LPrevious := LState;
+        LState := Default(TMiniAppOutboxState);
+        LState.PreviousDocumentIDs := Copy(LPrevious.PreviousDocumentIDs);
+        if LPrevious.DocumentID <> '' then
+        begin
+          SetLength(LState.PreviousDocumentIDs, Length(LState.PreviousDocumentIDs) + 1);
+          LState.PreviousDocumentIDs[High(LState.PreviousDocumentIDs)] := LPrevious.DocumentID;
+        end;
+        LState.ChannelIntended := LInfo.DeliveryChannel;
+        LState.UploadUnconfirmed := True;
+        LState.LastError := 'Upload begonnen, Ergebnis noch ungeklärt. Nicht erneut senden.';
+        Store; // Vor dem POST: ohne sichere Ablage geht nichts ins Netz.
+        LParams := Default(TTraffiqxDeliveryParamameter);
+        LParams.PreferredFormat := pfXRechnung;
+        LUploaded := AApi.UploadStructuredData(LUploadXml, LPdf, 'rechnung.xml',
+          'belegbild.pdf', LParams.ToJsonString, LUpload, LError);
+        if not LUploaded then
+        begin
+          if (LError <> nil) and (LError.Status = 201) and (LError.Title = '#PARSE') then
+          begin
+            LState.UploadedAt := OutboxTimestamp;
+            Report('HTTP 201: angenommen, aber keine lesbare document_id. NICHT ERNEUT SENDEN; bei DATEV klären.', lkError);
+            ApiFailure('Upload angenommen; nicht erneut senden', LError);
+          end
+          else
+          begin
+            // Nur eine eindeutige Ablehnung erlaubt eine Wiederholung. 5xx/Transport
+            // können einen serverseitig bereits angenommenen Upload verdecken.
+            if (LError <> nil) and (((LError.Status >= 400) and (LError.Status < 500)) or
+              (LError.Title = '#LOCAL')) then
+              LState := LPrevious;
+            ApiFailure('Upload fehlgeschlagen', LError);
+            if LState.UploadUnconfirmed then
+              Report('Annahme ungeklärt. Nicht erneut senden; zuerst bei DATEV prüfen.', lkError);
+          end;
+          Exit;
+        end;
+        LState.DocumentID := LUpload.DocumentId;
+        LState.Status := 'inProcess';
+        LState.UploadedAt := OutboxTimestamp;
+        LState.UploadUnconfirmed := False;
+        LState.LastError := '';
+        try
+          Store; // ID sofort sichern, bevor irgendeine Statusabfrage beginnt.
+        except
+          Report('UPLOAD ANGENOMMEN, ID NICHT SICHER GESPEICHERT: ' + LState.DocumentID +
+            '. NICHT ERNEUT SENDEN! ID sichern und lokale Ablage reparieren.', lkError);
+          raise;
+        end;
+        Report('Upload angenommen: document_id=' + LState.DocumentID);
+      end;
+
+      if LState.DocumentID = '' then
+      begin
+        Report('Keine document_id vorhanden. Bei ungeklärtem Upload zuerst den Stand bei DATEV klären.', lkWarning);
+        Exit;
+      end;
+      if LState.ChannelIntended = '' then
+      begin
+        LInfo := LoadInvoiceInfo(AInvoiceNumber);
+        LState.ChannelIntended := LInfo.DeliveryChannel;
+        Store;
+      end;
+      if LState.Status <> 'sent' then
+      begin
+        // Nach einem langen Upload erneut volle Pollingzeit plus Antwortreserve verlangen.
+        RequireTokenTime(120);
+        if not AApi.WaitForOutboxDocumentSent(LState.DocumentID, LStatus, LError,
+          8000, 8000, 60000,
+          procedure(const AStatus: TTraffiqxInboxDocumentStatusInfo; AElapsedMs: Cardinal)
+          begin
+            ApplyOutboxStatus(AApi, ASink, AInvoiceNumber, LState, AStatus, AElapsedMs);
+          end) then
+        begin
+          ApiFailure('Statusabfrage nicht abgeschlossen', LError);
+          Exit;
+        end;
+      end;
+      // Zwingende Schranke für beide nachfolgenden Endpunkte (auch bei Wiederaufnahme).
+      if LState.Status <> 'sent' then Exit;
+      if LState.MetadataAt = '' then
+      begin
+        RequireTokenTime(15);
+        if not AApi.GetOutboxDocumentMetadata(LState.DocumentID, LMetadata, LError) then
+        begin
+          ApiFailure('Metadaten nicht abrufbar', LError);
+          Exit;
+        end;
+        if (LMetadata = nil) or (LMetadata.DeliveryChannel = nil) then
+          raise EConvertError.Create('Metadaten enthalten keinen Versandkanal.');
+        if (LMetadata.DocumentFormat = '') or (LMetadata.SendDate = 0) or
+          (LMetadata.DeliveryChannel.Name = '') or (LMetadata.DeliveryChannel.Address = '') then
+          raise EConvertError.Create('Metadaten sind unvollständig; später erneut abfragen.');
+        LState.DocumentFormat := LMetadata.DocumentFormat;
+        if LMetadata.SendDate <> 0 then
+          LState.SendDate := DateToISO8601(LMetadata.SendDate, False);
+        LState.DeliveryChannel := LMetadata.DeliveryChannel.Name;
+        LState.DeliveryAddress := LMetadata.DeliveryChannel.Address;
+        LState.ChannelMatches := TraffiqxChannelMatches(LState.ChannelIntended, LState.DeliveryChannel);
+        LState.MetadataAt := OutboxTimestamp;
+        LState.LastError := '';
+        Store;
+      end;
+      Report('Format: ' + LState.DocumentFormat + '; Versanddatum: ' + LState.SendDate +
+        '; Kanal soll/ist: ' + LState.ChannelIntended + '/' + LState.DeliveryChannel +
+        '; Versandadresse: ' + LState.DeliveryAddress);
+      if not LState.ChannelMatches then
+        Report('Versandkanal weicht ab: gewollt ' + LState.ChannelIntended +
+          ', tatsächlich ' + LState.DeliveryChannel + '.', lkWarning);
+      if LState.ArchivedAt = '' then
+      begin
+        RequireTokenTime(15);
+        if not AApi.DownloadOutboxDocument(LState.DocumentID, LContent, LPending, LError) then
+        begin
+          if LPending <> nil then
+          begin
+            LState.LastError := 'Original noch nicht bereit (HTTP 202). Später „Status abfragen“ wählen.';
+            Report(LState.LastError, lkWarning);
+            Store; // Pending-Status darf das bereits bestätigte sent nicht zurückstufen.
+          end
+          else
+            ApiFailure('Original nicht abrufbar', LError);
+          Exit;
+        end;
+        ArchiveOutboxOriginal(AInvoiceNumber, LContent);
+        LState.ArchivedAt := OutboxTimestamp;
+        LState.LastError := '';
+        Store;
+        Report('Original vollständig abgelegt: ' + TPath.Combine(InvoiceDirectory(AInvoiceNumber), 'original'));
+      end;
+    except
+      on E: Exception do
+      begin
+        LText := SafeOutboxText(AApi, E.Message);
+        Report('Vorgang abgebrochen: ' + LText, lkError);
+        if LLoaded then
+        begin
+          LState.LastError := LText;
+          if LState.UploadUnconfirmed then
+          begin
+            LState.LastError := LState.LastError + ' Upload ungeklärt: NICHT ERNEUT SENDEN.';
+            Report(LState.LastError, lkError);
+          end;
+          try
+            Store;
+          except
+            Report('outbox.json konnte nicht gespeichert werden. document_id=' + LState.DocumentID +
+              '. NICHT ERNEUT SENDEN; Ablage und Stand bei DATEV prüfen.', lkError);
+          end;
+        end;
+      end;
+    end;
+  finally
+    LMetadata.Free;
+    LPending.Free;
+    LStatus.Free;
+    LError.Free;
+    LUpload.Free;
+    LContent.Free;
+    LPrepared.Free;
+    LPdf.Free;
+    LXml.Free;
+  end;
+end;
+
+procedure TMiniAppService.StartOutbox(const AInvoiceNumber: string; ASend: Boolean;
+  AAllowResend: Boolean);
+var
+  LApi: TTRAFFIQXInvoiceAPI;
+  LSink: IMiniAppOutboxSink;
+begin
+  RequireMainThread;
+  if FBusy or FConnecting then Exit;
+  if not Connected then
+  begin
+    Log('Nicht verbunden – zuerst die DATEV-Verbindung herstellen und prüfen.', lkWarning);
+    Exit;
+  end;
+  if not EnsureAccessToken(120) then Exit;
+  SetBusy(True);
+  LApi := nil;
+  try
+    LApi := TTRAFFIQXInvoiceAPI.Create;
+    LApi.ProviderType := FApi.ProviderType;
+    LApi.Environment := FApi.Environment;
+    LApi.ClientId := FConfig.ClientID;
+    LApi.ClientSecret := FConfig.ClientSecret;
+    LApi.TRAFFIQXId := FConfig.TraffiqxID;
+    LApi.Scope := FConfig.Scope;
+    LApi.AppDisplayName := FConfig.AppDisplayName;
+    LApi.OAuth2BrokerCallbackUri := FConfig.OAuth2BrokerCallbackUri;
+    LApi.OAuth2BrokerApiKey := FConfig.OAuth2BrokerApiKey;
+    LApi.AccessToken := FApi.AccessToken;
+    LApi.AccessTokenExpiresAt := FApi.AccessTokenExpiresAt;
+    TTraffiqxHttpLog.Attach(LApi);
+    LSink := FOutboxSink;
+    FOperation := TTask.Run(
+      procedure
+      begin
+        try
+          try
+            ExecuteOutbox(LApi, AInvoiceNumber, ASend, AAllowResend, LSink);
+          finally
+            LApi.Free;
+          end;
+        finally
+          TThread.Queue(nil,
+            procedure
+            begin
+              LSink.Finished;
+            end);
+        end;
+      end);
+  except
+    LApi.Free;
+    SetBusy(False);
+    raise;
+  end;
+end;
 
 procedure TMiniAppService.RequireMainThread;
 begin
@@ -121,6 +585,7 @@ begin
   inherited Create;
   RequireMainThread;
   FLog := ALog;
+  FOutboxSink := TMiniAppOutboxSink.Create(Self);
   FConfig := AConfig;
   FApi := TTRAFFIQXInvoiceAPI.Create;
   FApi.ProviderType := tpDatev;
@@ -179,6 +644,13 @@ end;
 
 destructor TMiniAppService.Destroy;
 begin
+  // Auch direktes Free außerhalb von FormCloseQuery ist sicher. Erst Queue-Ziel
+  // lösen, dann Worker abwarten; er nutzt weder Synchronize noch die Haupt-API.
+  if FOutboxSink <> nil then FOutboxSink.Detach;
+  if FOperation <> nil then FOperation.Wait;
+  FOperation := nil;
+  FOutboxSink := nil;
+  FOnOutboxChanged := nil;
   FOnChanged := nil;
   FOnConfirmLoginUnconfirmed := nil;
   FLog := nil;

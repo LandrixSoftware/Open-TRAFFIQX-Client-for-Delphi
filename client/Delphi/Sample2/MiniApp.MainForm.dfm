@@ -1,7 +1,7 @@
 ﻿object MiniAppMainForm: TMiniAppMainForm
   Left = 0
   Top = 0
-  Caption = 'TIA Mini-Anwendung – DATEV-Verbindung und Rechnungen (S1–S3)'
+  Caption = 'TIA Mini-Anwendung – DATEV-Verbindung und Rechnungen (S1–S5)'
   ClientHeight = 820
   ClientWidth = 1040
   Constraints.MinHeight = 600
@@ -1101,13 +1101,22 @@
         AutoSize = False
         Height = 36
         Top = 0
-        Caption = 'Testrechnung als XRechnung mit Platzhalter-PDF. Versand und Originalablage folgen in S4/S5.'
+        Caption = 'GoBD-konforme Archivierung: Das Original liegt im Rechnungsordner. Die DATEV E-Rechnungsplattform archiviert nicht.'
+        WordWrap = True
+        Layout = tlCenter
+      end
+      object OutgoingConnectionHint: TLabel
+        Align = alTop
+        Top = 36
+        AutoSize = False
+        Height = 36
+        Caption = 'Ohne geprüfte DATEV-Verbindung sind die Versandfunktionen gesperrt.'
         WordWrap = True
         Layout = tlCenter
       end
       object OutgoingCustomerPanel: TPanel
         Align = alTop
-        Top = 36
+        Top = 72
         Height = 40
         BevelOuter = bvNone
         TabOrder = 0
@@ -1128,8 +1137,8 @@
       end
       object OutgoingButtons: TFlowPanel
         Align = alTop
-        Top = 76
-        Height = 76
+        Top = 112
+        Height = 112
         AutoWrap = True
         BevelOuter = bvNone
         TabOrder = 1
@@ -1174,6 +1183,48 @@
           TabOrder = 4
           OnClick = OutgoingShow
         end
+        object SendInvoiceButton: TButton
+          AlignWithMargins = True
+          Width = 115
+          Height = 30
+          Caption = 'Senden'
+          Enabled = False
+          TabOrder = 5
+          OnClick = SendInvoiceClick
+        end
+        object QueryStatusButton: TButton
+          AlignWithMargins = True
+          Width = 140
+          Height = 30
+          Caption = 'Status abfragen'
+          Enabled = False
+          TabOrder = 6
+          OnClick = QueryStatusClick
+        end
+        object ShowOriginalButton: TButton
+          AlignWithMargins = True
+          Width = 145
+          Height = 30
+          Caption = 'Original anzeigen'
+          Enabled = False
+          TabOrder = 7
+          OnClick = ShowOriginalClick
+        end
+      end
+      object OutgoingDetails: TMemo
+        Align = alBottom
+        Top = 600
+        Height = 160
+        ReadOnly = True
+        ScrollBars = ssBoth
+        WordWrap = False
+        TabOrder = 3
+      end
+      object OutgoingSplitter: TSplitter
+        Align = alBottom
+        Top = 595
+        Height = 5
+        MinSize = 60
       end
       object OutgoingList: TListView
         Align = alClient
@@ -1182,6 +1233,7 @@
         RowSelect = True
         HideSelection = False
         ViewStyle = vsReport
+        OnSelectItem = OutgoingSelected
         Columns = <
           item
             Caption = 'Nummer'
@@ -1200,7 +1252,7 @@
             Width = 110
           end
           item
-            Caption = 'Versandweg'
+            Caption = 'Kanal soll'
             Width = 110
           end
           item
@@ -1209,7 +1261,11 @@
           end
           item
             Caption = 'Status'
-            Width = 110
+            Width = 125
+          end
+          item
+            Caption = 'Kanal ist'
+            Width = 160
           end>
       end
     end

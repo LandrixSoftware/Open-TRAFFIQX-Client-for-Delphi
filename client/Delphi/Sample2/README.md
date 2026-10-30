@@ -1,15 +1,15 @@
-﻿# TIA Mini-Anwendung – Scheiben S1 bis S3
+﻿# TIA Mini-Anwendung – Scheiben S1 bis S5
 
 Eigenständiges VCL-Projekt `TIAMiniApp.dproj` für Win32/Win64, jeweils Debug/Release.
 Der Umfang folgt [`Sample2.md`](../../../Sample2.md): Stammdaten, JSON-Ablage und
-Fenstergerüst, lokale XRechnung-Erzeugung mit Ausgangsliste und DATEV-Verbindung.
-Versand und Eingang folgen in S4–S6, die erweiterte Protokollauswertung in S7.
-S3 führt TIA-Aufrufe für Anmeldung, Check, Userinfo, Refresh und Widerruf aus.
+Fenstergerüst, lokale XRechnung-Erzeugung, DATEV-Verbindung und Versand bis zum
+abgelegten Original. Der Eingang folgt in S6, die erweiterte Protokollauswertung in S7.
+S3 führt Anmeldung, Check, Userinfo, Refresh und Widerruf aus; S4/S5 ergänzen Upload,
+Status, Versandmetadaten und Originaldownload.
 
 ## Start und Bedienung
 
-Das Projekt direkt in Delphi öffnen; es ist noch nicht in der Projektgruppe
-eingetragen. Die EXE liegt wie beim bisherigen Sample unter
+Das Projekt direkt in Delphi öffnen. Die EXE liegt wie beim bisherigen Sample unter
 `Win32|Win64/Debug|Release`. Der Bibliotheks- und XRechnung-Suchpfad ist übernommen;
 S2 verwendet zusätzlich `intf.Invoice`, `intf.XRechnung` und den Java-Prüfhelfer
 aus dem benachbarten Repository `src-XRechnung-for-Delphi`. WebView2 wird nicht benötigt.
@@ -114,18 +114,18 @@ Refresh, kein neuer Login. **Mit DATEV verbinden** oder **Verbindung trennen**
 versucht den Widerruf erneut, auch nach einem Neustart. **Verbundene Anwendungen**
 öffnet <https://apps.datev.de/tokrevui> zur Verwaltung bei DATEV.
 
-`TMiniAppService` besitzt genau eine API-Instanz und verwendet sie ausschließlich
-im Hauptthread. Die synchronen Abläufe zeigen eine Sanduhr; Netzstörungen können
-die Oberfläche bis zum HTTP-Timeout blockieren. Worker für weitere Abläufe gehören
-zu S4. Abschluss- und Anzeige-Callbacks warten nicht auf Threads und rufen weder
-`ProcessMessages` noch `CheckSynchronize` auf. Nur das Ereignis
+`TMiniAppService` verwendet seine Verbindungs-API ausschließlich im Hauptthread.
+Die synchronen Verbindungsabläufe zeigen eine Sanduhr; Netzstörungen können die
+Oberfläche bis zum HTTP-Timeout blockieren. Versand/Status laufen dagegen in
+`TTask.Run` mit einer eigenen API (siehe S4/S5 unten). Abschluss- und Anzeige-Callbacks
+warten nicht auf Threads und rufen weder `ProcessMessages` noch `CheckSynchronize` auf. Nur das Ereignis
 `OnConfirmLoginUnconfirmed` darf vor einem neuen Login ohne laufendes Polling eine
 modale Rückfrage öffnen; der Service bleibt ohne VCL-Abhängigkeit. Der statische
 `TTraffiqxHttpLog`
 schreibt auch die Polling-Anfragen threadsicher nach `Daten/httplog/`, mit 14 Tagen
 Aufbewahrung. Er hält keine Referenz auf das Fenster oder den Service.
 
-`EnsureAccessToken(AMinValidSeconds)` steht für die folgenden Scheiben bereit:
+`EnsureAccessToken(AMinValidSeconds)` wird vor Versand/Status mit 120 Sekunden verwendet:
 bei zu kurzer Access-Laufzeit Refresh durchführen und die rotierten Tokens sofort
 speichern. Vor dem Single-Use-Austausch wird ein Widerrufmarker persistiert, damit
 ein Absturz oder unklarer Transportfehler nicht zur erneuten Verwendung des alten
@@ -182,6 +182,15 @@ Dialoge geöffnet.
 - Eine zweite Programminstanz auf demselben Datenbestand wird durch die Sperre
   für `stammdaten.json` (`stammdaten.json.lock`) verhindert. Getrennte Datenordner
   teilen diese Sperre nicht.
+- Ungeklärte Uploads (etwa nach Transportabbruch oder HTTP 201 ohne lesbare ID)
+  bleiben dauerhaft gesperrt. Das Sample bietet keine automatische Auflösung;
+  Stand bei DATEV und HTTP-Protokoll müssen vor einer manuellen Reparatur geprüft werden.
+- Die Originalablage liest das ZIP vollständig in den Arbeitsspeicher und begrenzt
+  die entpackte Gesamtgröße auf 256 MiB. Größere Originale werden nicht archiviert;
+  abweichende bereits vorhandene Originale erfordern eine manuelle Prüfung.
+- Der lokale Originalordner allein gewährleistet keine GoBD-konforme Archivierung.
+  Unveränderbarkeit, Aufbewahrung und Sicherung muss die integrierende Anwendung
+  beziehungsweise ein angebundenes Archivsystem gewährleisten.
 
 ## Rechnungen erzeugen (S2)
 
@@ -225,8 +234,103 @@ die spätere Stammdatenänderungen nicht verändern. Der `out`-Parameter
 Lücken bleiben bestehen; eine Teilablage bleibt zur Diagnose erhalten und erscheint
 mit Hinweis in der Liste. Ohne lesbare `rechnung.json` wird keine fertige Rechnung
 behauptet. Fehler stehen im Protokoll. `document_id` und Status bleiben leer, solange
-keine `outbox.json` existiert; vorhandene Textfelder `document_id` und `status`
-werden daraus gelesen. S2 schreibt diese Versanddatei noch nicht.
+keine `outbox.json` existiert. Ab S4/S5 erscheinen zusätzlich Soll-/Ist-Kanal und
+alle Versanddetails aus dieser Datei. Die reine Rechnungserzeugung schreibt
+`outbox.json` noch nicht.
+
+## Versand und Originalablage (S4/S5)
+
+Im Reiter **Ausgang** eine fertige Testrechnung auswählen und **Senden** wählen.
+Voraussetzung ist eine aktuell geprüfte DATEV-Verbindung. Der Sollkanal stammt aus
+der beim Erzeugen gespeicherten Kunden-Momentaufnahme in `rechnung.json`.
+Spätere Stammdatenänderungen lenken eine bestehende Rechnung nicht um.
+Die Sandbox verwendet nur für den Upload eine XML-Kopie mit `SBSZ:210` bei Peppol,
+sonst `SBSZ:110`; `rechnung.xml` bleibt unverändert. Produktion überträgt die
+unveränderte XML. `UploadStructuredData` sendet XML und `belegbild.pdf` mit den
+Dateinamen `rechnung.xml`/`belegbild.pdf` und Wunschformat XRechnung (`pfXRechnung`).
+
+Vor dem Vorgang erneuert `EnsureAccessToken(120)` erforderlichenfalls im Hauptthread
+die Tokens und speichert sie. Anschließend wird dort eine separate API mit derselben
+Konfiguration, einer Kopie des Access-Tokens und HTTP-Protokollierung angelegt.
+Der Worker bekommt kein Refresh-Token und verwendet ausschließlich diese API.
+Seine Meldungen und Listenaktualisierungen laufen über `TThread.Queue`.
+Immer nur ein Netzwerkvorgang ist möglich; die entsprechenden Knöpfe sind gesperrt.
+Beim Schließen kann man auf den Abschluss mit anschließendem automatischem Schließen
+warten oder das Fenster offen lassen. Bereits eingereihte Meldungen besitzen ein
+referenzgezähltes Ziel, das beim Freigeben abgetrennt wird. Auch direktes Freigeben
+des Service wartet auf den Worker, bevor Ressourcen verschwinden.
+
+`outbox.json` wird atomar geschrieben. Ein Upload-Marker wird **vor dem POST**
+gespeichert; nach Erfolg werden **sofort**, vor der ersten Statusabfrage,
+`document_id`, `inProcess` und `uploaded_at` gesichert. Scheitert diese Speicherung,
+meldet das Protokoll die ID ausdrücklich mit **NICHT ERNEUT SENDEN**. Der vorher
+gespeicherte Marker schützt auch nach einem Neustart vor Doppelversand.
+
+| Felder in `outbox.json` | Bedeutung |
+|---|---|
+| `document_id`, `status` | Aktueller Upload und zuletzt erreichter Status |
+| `channel_intended`, `uploaded_at`, `checked_at` | Gewollter Kanal, Annahmezeit, letzte erfolgreiche Statusantwort |
+| `document_format`, `send_date`, `delivery_channel`, `delivery_address` | Von DATEV bestätigte Versanddaten |
+| `channel_matches`, `metadata_at` | Soll/Ist-Prüfung (`null` vor Metadaten), Zeitpunkt des Metadatenabrufs |
+| `archived_at`, `last_error` | Zeitpunkt der vollständigen Originalablage, letzte Fehlermeldung |
+| `previous_document_ids` | Frühere IDs bei ausdrücklich bestätigtem Neuversand |
+| `upload_unconfirmed` | Annahme ungeklärt: weiteren Upload sperren, auch ohne bekannte ID |
+
+Zeitstempel sind ISO-8601-Werte mit Zeitzone. Ein vorhandener Datensatz mit ID
+sperrt **Senden**, außer bei `error` oder `deleted`; auch dann ist eine Rückfrage
+nötig. Die alte ID bleibt bei einem neuen Versuch erhalten. Der Status fällt für
+dieselbe ID nie zurück: `inProcess < userAction < error < deleted < sent`.
+Unbekannte Statuswerte werden mit Rohwert und Beschreibung gemeldet; eine ID mit
+unbekanntem Status erlaubt keinen Neuversand. Unlesbare Ablagen sperren ebenfalls.
+
+HTTP 201 ohne auswertbare ID (`#PARSE`), Transportfehler und unklare Serverfehler
+bleiben als unbestätigter Upload gesperrt. **Nicht erneut senden.** Den Stand mit
+HTTP-Protokoll und DATEV-Plattform klären. Das Sample besitzt dafür keinen
+„Sperre ignorieren“-Knopf: Eine ermittelte ID muss nach Prüfung in der lokalen
+Ablage mit passendem Status zugeordnet und `upload_unconfirmed` aufgehoben werden.
+Nur bei eindeutig abgelehntem Upload (4xx oder lokalem Konfigurationsfehler) wird
+der vorherige Zustand wiederhergestellt und der Fehler protokolliert.
+
+`WaitForOutboxDocumentSent` fragt sofort und danach alle 8 Sekunden ab, maximal
+60 Sekunden (8 s / 8 s / 60 s). Ein bereits laufender HTTP-Aufruf kann länger
+dauern. Nach einem langen Upload werden vor dem Polling erneut mindestens
+120 Sekunden Access-Restlaufzeit verlangt (60 Sekunden Polling plus Antwortreserve);
+sonst später **Status abfragen** wählen.
+Vor Metadaten und Download werden jeweils noch 15 Sekunden verlangt.
+Alle Statusantworten erscheinen mit `DescribeStatus`; Fehlercodes und Details
+werden verständlich übersetzt. Hilfe-URLs erscheinen im Protokoll und, soweit
+verfügbar, am vorhandenen Hilfe-Link. Nach Timeout erfolgt kein automatischer
+Neuversand. **Status abfragen** setzt denselben Vorgang anhand der gespeicherten ID
+fort, auch nach Neustart und erneutem Verbindungscheck.
+
+Erst nach bestätigtem **sent** werden Metadaten und Original abgerufen. Metadaten
+werden nur bei leerem `metadata_at` geholt. Format, Versanddatum, Kanal und Adresse
+erscheinen im Detailbereich; fehlende Pflichtwerte lassen den Schritt offen.
+`TraffiqxChannelMatches` prüft den Soll-/Ist-Kanal. Eine Abweichung steht als Warnung
+im Protokoll und in der Ausgangsliste, verhindert aber nicht die Originalablage.
+HTTP 202 beim Download bedeutet **noch nicht bereit**; `sent` bleibt erhalten,
+`archived_at` bleibt leer und **Status abfragen** holt das Original später nach.
+
+Das ZIP wird vollständig in den Speicher gelesen und durch `System.Zip` geprüft;
+zusätzlich wird die CRC gegen das zentrale ZIP-Verzeichnis abgeglichen,
+bevor Dateien geschrieben werden. Es werden alle enthaltenen Dateien verwendet,
+keine festen Namen erwartet. Unterordner werden abgeflacht, ungültige Zeichen
+bereinigt und eindeutige Nummern vorangestellt (auch gegen Windows-Gerätenamen und
+Namenskollisionen). Die entpackte Gesamtgröße ist im Sample auf 256 MiB begrenzt.
+Erst nach vollständig geschriebenen und gespülten Dateien wird ein temporärer
+Nachbarordner als `original` veröffentlicht; danach wird `archived_at` gesetzt.
+Teilordner `original.<GUID>.tmp` bleiben bei Schreibfehlern zur Diagnose erhalten.
+Ein bereits veröffentlichter, bytegleich passender Originalordner wird nach einem
+Absturz vor dem Zeitstempel übernommen; Abweichungen brauchen manuelle Prüfung.
+**Original anzeigen** öffnet den Ordner mit allen Dateien zum Öffnen im jeweiligen
+Standardprogramm. Ohne geprüfte Verbindung sind die drei neuen Knöpfe deaktiviert;
+ein Hinweis erklärt den Grund. Die lokale Rechnungserzeugung bleibt verfügbar.
+
+Der Reiter nennt den Archivierungsort ausdrücklich:
+„GoBD-konforme Archivierung: Das Original liegt im Rechnungsordner. Die DATEV
+E-Rechnungsplattform archiviert nicht.“ Die lokale Sample-Ablage ersetzt kein
+Archivsystem mit Unveränderbarkeit, Aufbewahrung und Sicherung; diese Maßnahmen
+bleiben Aufgabe der integrierenden Anwendung.
 
 ## Optionale KoSIT-Prüfung
 
@@ -334,4 +438,65 @@ Zusätzlich für S3 in der Sandbox und einem separaten Testbestand prüfen:
    Tokenwerte/Secrets dürfen nicht enthalten sein. Aufbewahrung gemäß
    `TTraffiqxHttpLog.RETENTION_DAYS` (14 Tage), Fehlerquote erst S7.
 
-Build sowie Delphi-/DATEV-/KoSIT-Laufzeittests sind gemäß Auftrag nicht ausgeführt.
+Build am 30.10.2026: Win32 Debug erfolgreich (ExitCode 0), keine Warnungen in
+Sample2-Units. Die Build-Umgebung meldet einen fehlenden optionalen Registry-Pfad
+und einen nicht vorhandenen TMS-Suchpfad; außerdem bestehen Hinweise in der
+unveränderten API-Bibliothek. DATEV-, KoSIT- und interaktive VCL-/DPI-Prüfungen
+sowie die weiteren Build-Konfigurationen bleiben offen.
+
+Lokale Delphi-Laufzeitprüfung am 30.10.2026 mit isolierten Scratchpad-Testdaten:
+JSON-Rundlauf, monotone Statusfolge, neue ID mit Historie, persistente Uploadsperre,
+defektes JSON und ältere `#PARSE`-Marker erfolgreich geprüft. ZIP-Prüfungen für
+verschachtelte/ungültige Dateinamen, vollständige Ablage, Wiederaufnahme und den
+Schutz vorhandener Originale bestanden; beschädigte Nutzdaten/CRC-Verzeichnisse,
+leere/defekte ZIPs und übergroße Einträge wurden vor der Veröffentlichung abgewiesen.
+
+### Prüfliste S4/S5
+
+Win32 Debug wurde gebaut; die folgenden DATEV-/UI-Prüfungen bleiben offen.
+Auch Win32 Release und Win64 Debug/Release in einem separaten Testbestand prüfen;
+Fehlerantworten gegebenenfalls mit einer kontrollierten Test-API simulieren:
+
+1. Ohne Verbindung: drei neue Knöpfe gesperrt, Hinweis sichtbar; lokale Erzeugung
+   funktioniert. Nach Verbindungscheck die ausgewählte Rechnung senden. UI bleibt
+   während des Workers bedienbar, kein zweiter Vorgang und kein Umgebungswechsel.
+2. Sandbox: Peppol verwendet `SBSZ:210`, übrige Wege `SBSZ:110`; Hash der lokalen
+   `rechnung.xml` bleibt gleich. Bei Produktion kein Sandbox-Marker (nur gezielt
+   mit geeigneten Daten testen). HTTP-Protokoll enthält Upload und Folgeaufrufe.
+3. Nach HTTP 201 muss `outbox.json` die ID und `inProcess` enthalten, **bevor** die
+   erste Statusabfrage startet. ID und Status sind in der Liste sichtbar. Zweiter
+   Versand und Versand nach Neustart bei aktiver ID bleiben gesperrt.
+4. `inProcess`, `userAction`, `error`, `deleted`, `sent` und unbekannten Status
+   simulieren; Rohwert, verständliche Beschreibung und Fehlerdetails prüfen.
+   Rückläufige Antworten dürfen den gespeicherten Rang nicht senken. Bei
+   `error`/`deleted` Rückfrage ablehnen: kein POST. Bestätigen: neue ID, alte ID in
+   `previous_document_ids`, Rang beginnt für die neue ID bei `inProcess`.
+5. Dauerhaft `inProcess`: sofortige erste Abfrage, 8-s-Abstände, kein neuer Aufruf
+   ab 60 s. Danach „Status abfragen“ ohne neuen Upload. Token kurz vor Ablauf und
+   sehr langsamen Upload prüfen: Refresh nur vorher im Hauptthread; bei zu wenig
+   Restlaufzeit kein neues Polling und späteres Fortsetzen mit derselben ID.
+6. 201 mit `{}`, leerer ID oder kaputtem JSON, Netzwerkabbruch sowie 5xx nach
+   Annahme simulieren: deutlicher Hinweis, `last_error`, persistente Versandsperre
+   auch nach Neustart. 4xx-Ablehnung erlaubt nach Beheben einen neuen Versuch.
+7. Schreibfehler vor POST: kein Upload. Schreibfehler direkt nach erfolgreichem
+   Upload: Warnung mit ID und „NICHT ERNEUT SENDEN“, kein Statuspolling; persistierter
+   Vormarker bleibt wirksam. Fehler bei späterem Statusschreiben: ID nicht verlieren.
+   Ungültiges JSON/Zugriff verweigert darf niemals als fehlende Ablage gelten.
+8. Vor `sent`: weder Metadata- noch Download-Aufruf. Nach `sent`: Format, Datum,
+   Kanal und Adresse sichtbar; Kanalabweichung warnt (auch nach Neustart), Leitweg-ID
+   akzeptiert passende TRAFFIQX-/Peppol-Zustellung gemäß Bibliothekshelfer.
+9. Download HTTP 202: „noch nicht bereit“, weiter `sent`, kein `archived_at`.
+   Späteren Abruf erfolgreich abschließen. Bereits vorhandenes `metadata_at`
+   verhindert erneuten Metadatenabruf; vorhandenes `archived_at` verhindert Download.
+10. ZIP mit mehreren/verschachtelten Dateien, identischen Basisnamen, `../`,
+    absoluten Pfaden, `CON.xml` und ungültigen Zeichen: vollständige, eindeutige
+    Ablage ausschließlich in `original`. Leeres/defektes ZIP, CRC-Fehler und mehr
+    als 256 MiB: keine Archivierungsmarkierung. Schreibfehler im temporären Ordner
+    und Absturz nach Veröffentlichung vor `archived_at`: sichere Wiederaufnahme.
+11. Während Upload/Polling/Download schließen: „Nein“ lässt offen, „Ja“ schließt
+    nach Abschluss; auch Abschluss während des Dialogs prüfen. Direkte Freigabe
+    mit ausstehenden Queue-Meldungen darf keinen Zugriff auf freigegebene Objekte
+    verursachen. Fehlerdialoge und Protokoll dürfen keine Tokens enthalten.
+12. Bei 100/150/200 Prozent DPI und minimaler Fenstergröße: neue Knöpfe erreichbar,
+    Ausgangsliste horizontal scrollbar, Detailbereich scrollbar/teilbar, Hinweis
+    zur Archivierung sichtbar. „Original anzeigen“ öffnet die vollständige Ablage.

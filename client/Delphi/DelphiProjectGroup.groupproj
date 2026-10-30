@@ -6,6 +6,9 @@
         <Projects Include="Sample\TIAProject.dproj">
             <Dependencies/>
         </Projects>
+        <Projects Include="Sample2\TIAMiniApp.dproj">
+            <Dependencies/>
+        </Projects>
     </ItemGroup>
     <ProjectExtensions>
         <Borland.Personality>Default.Personality.12</Borland.Personality>
@@ -23,14 +26,23 @@
     <Target Name="TIAProject:Make">
         <MSBuild Projects="Sample\TIAProject.dproj" Targets="Make"/>
     </Target>
+    <Target Name="TIAMiniApp">
+        <MSBuild Projects="Sample2\TIAMiniApp.dproj"/>
+    </Target>
+    <Target Name="TIAMiniApp:Clean">
+        <MSBuild Projects="Sample2\TIAMiniApp.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="TIAMiniApp:Make">
+        <MSBuild Projects="Sample2\TIAMiniApp.dproj" Targets="Make"/>
+    </Target>
     <Target Name="Build">
-        <CallTarget Targets="TIAProject"/>
+        <CallTarget Targets="TIAProject;TIAMiniApp"/>
     </Target>
     <Target Name="Clean">
-        <CallTarget Targets="TIAProject:Clean"/>
+        <CallTarget Targets="TIAProject:Clean;TIAMiniApp:Clean"/>
     </Target>
     <Target Name="Make">
-        <CallTarget Targets="TIAProject:Make"/>
+        <CallTarget Targets="TIAProject:Make;TIAMiniApp:Make"/>
     </Target>
     <Import Project="$(BDS)\Bin\CodeGear.Group.Targets" Condition="Exists('$(BDS)\Bin\CodeGear.Group.Targets')"/>
 </Project>
