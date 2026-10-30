@@ -41,6 +41,7 @@ type
     procedure Entry(const AText: string; AKind: TMiniAppLogKind; const AHelpUrl: string);
     procedure Changed;
     procedure InboxResult(const AText: string; AInvalidCount: Integer);
+    procedure ErrorRateResult(const AText: string);
     procedure Finished;
     procedure Detach;
   end;
@@ -71,6 +72,7 @@ type
     FStorageBlocked: Boolean;
     FUserName: string;
     FHelpUrl: string;
+    FErrorRateText: string;
     function CreateWorkerApi: TTRAFFIQXInvoiceAPI;
     procedure RequireMainThread;
     procedure Changed;
@@ -105,6 +107,7 @@ type
     procedure StartOutbox(const AInvoiceNumber: string; ASend: Boolean;
       AAllowResend: Boolean = False);
     procedure StartInbox(AAll: Boolean; const AMetadataDocumentID: string = '');
+    procedure RefreshErrorRate;
     property OnInboxResult: TMiniAppInboxResultEvent read FOnInboxResult write FOnInboxResult;
     property OnOutboxChanged: TMiniAppChangedEvent read FOnOutboxChanged write FOnOutboxChanged;
     property OnChanged: TMiniAppChangedEvent read FOnChanged write FOnChanged;
@@ -123,6 +126,7 @@ type
     property TraffiqxID: string read GetTraffiqxID;
     property Environment: TMiniAppEnvironment read FEnvironment;
     property HelpUrl: string read FHelpUrl;
+    property ErrorRateText: string read FErrorRateText;
   end;
 
 implementation
@@ -140,6 +144,7 @@ type
     procedure Entry(const AText: string; AKind: TMiniAppLogKind; const AHelpUrl: string);
     procedure Changed;
     procedure InboxResult(const AText: string; AInvalidCount: Integer);
+    procedure ErrorRateResult(const AText: string);
     procedure Finished;
     procedure Detach;
   end;
@@ -159,12 +164,14 @@ procedure TMiniAppOutboxSink.Entry(const AText: string; AKind: TMiniAppLogKind;
   const AHelpUrl: string);
 begin
   if FOwner = nil then Exit;
-  FOwner.Log(AText, AKind);
   if AHelpUrl.StartsWith('https://', True) or AHelpUrl.StartsWith('http://', True) then
   begin
     FOwner.FHelpUrl := AHelpUrl;
+    FOwner.Log(AText + ' Hilfe: ' + AHelpUrl, AKind);
     FOwner.Changed;
-  end;
+  end
+  else
+    FOwner.Log(AText, AKind);
 end;
 
 procedure TMiniAppOutboxSink.Changed;
@@ -184,6 +191,81 @@ begin
   if FOwner = nil then Exit;
   FOwner.SetBusy(False);
   Changed;
+end;
+
+procedure TMiniAppOutboxSink.ErrorRateResult(const AText: string);
+begin
+  if FOwner = nil then Exit;
+  FOwner.FErrorRateText := AText;
+  FOwner.Changed;
+end;
+
+// Liest ausschließlich lokale HTTP-Dateien. Der Worker hält nur den ablösbaren
+// Sink und den vorher bestimmten Pfad, keine Formular- oder API-Referenz.
+procedure ExecuteErrorRate(const ADirectory: string; const ASink: IMiniAppOutboxSink);
+var
+  LRate: TTraffiqxErrorRate;
+  LText: string;
+begin
+  try
+    if not TTraffiqxHttpLog.GetErrorRate(ADirectory,
+      TTimeZone.Local.ToUniversalTime(Now), LRate) or LRate.Unreachable then
+      LText := 'Fehlerquote nicht verfügbar: HTTP-Protokoll nicht erreichbar.'
+    else
+    begin
+      if LRate.Requests = 0 then
+        LText := 'Keine Anfragen in den letzten 14 Tagen; Fehlerquote nicht bestimmbar.'
+      else
+        LText := Format('%.1f %% Fehler bei %d Anfragen',
+          [100.0 * LRate.Errors / LRate.Requests, LRate.Requests]);
+      if LRate.NoResponse > 0 then
+        LText := LText + Format(' | %d Transportfehler (separat gezählt)', [LRate.NoResponse]);
+      if LRate.Unreadable > 0 then
+        LText := 'Unvollständige Auswertung: ' + LText +
+          Format(' | %d Tagesdatei(en) nicht vollständig lesbar.', [LRate.Unreadable]);
+    end;
+    LText := LText + ' Stand: ' + FormatDateTime('dd.mm.yyyy hh:nn:ss', Now);
+  except
+    // Dateiinhalte und technische Exceptions gehören nicht in die Oberfläche.
+    LText := 'Fehlerquote konnte nicht gelesen werden. Zugriff auf das HTTP-Protokoll prüfen.';
+  end;
+  TThread.Queue(nil,
+    procedure
+    begin
+      ASink.ErrorRateResult(LText);
+    end);
+end;
+
+procedure TMiniAppService.RefreshErrorRate;
+var
+  LDirectory: string;
+  LSink: IMiniAppOutboxSink;
+begin
+  RequireMainThread;
+  if FBusy or FConnecting then Exit;
+  LDirectory := HttpLogDirectory;
+  LSink := FOutboxSink;
+  FErrorRateText := 'Fehlerquote wird gelesen …';
+  SetBusy(True);
+  try
+    FOperation := TTask.Run(
+      procedure
+      begin
+        try
+          ExecuteErrorRate(LDirectory, LSink);
+        finally
+          TThread.Queue(nil,
+            procedure
+            begin
+              LSink.Finished;
+            end);
+        end;
+      end);
+  except
+    FErrorRateText := 'Fehlerquoten-Auswertung konnte nicht gestartet werden.';
+    SetBusy(False);
+    raise;
+  end;
 end;
 
 // Eigener Aufrufrahmen je Meldung: keine veränderliche Schleifenvariable und

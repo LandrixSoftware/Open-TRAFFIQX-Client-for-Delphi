@@ -8,7 +8,7 @@ Wer TIA in die eigene Software einbauen und die DATEV-Produktionsfreigabe erreic
 
 - `OAuth2-Broker/`: PHP-Service für den OAuth2 Authorization Code Flow mit PKCE. Desktop-Clients starten den Flow über `/start`, der Provider ruft `/callback` auf und der Client holt das Ergebnis über `/poll` ab. Details stehen in `OAuth2-Broker/README.md`.
 - `client/Delphi/`: Delphi-Clientbibliothek und VCL-Sample für Provider-Auswahl, Login, Token-Refresh, Inbox, Outbox, Upload, Metadata, Download und Statusabfragen.
-- [`client/Delphi/Sample2/`](client/Delphi/Sample2/README.md): Kleine VCL-Anwendung im Aufbau; S1–S5 enthalten Stammdaten, XRechnung-Erzeugung, DATEV-Verbindung, Versand mit dauerhafter Doppelversandsperre sowie Status, Metadaten und Originalablage. Posteingang und erweiterte Protokollauswertung folgen.
+- [`client/Delphi/Sample2/`](client/Delphi/Sample2/README.md): Kleine VCL-Anwendung mit Stammdaten, XRechnung-Erzeugung, DATEV-Verbindung, Versand mit dauerhafter Doppelversandsperre, Status und Originalablage, Posteingang mit Wiederaufnahme sowie Protokoll und 14-Tage-Fehlerquote. Die Dokumentation enthält die Abnahme-Zuordnung und eine Sandbox-Prüfliste.
 - `OAuth2-Broker/session-store/`: Lokales Runtime-Verzeichnis für temporäre Broker-Sessions. Nur `.gitignore` gehört ins Repository, die entstehenden JSON-Dateien bleiben lokal.
 - `testdata/`: Synthetische Beispielrechnungen (XRechnung UBL/CII, ZUGFeRD) für manuelle Upload-Tests, erzeugt mit `client/Delphi/Sample/XRechnungUnit2TestCases.pas`. Alle Namen, Adressen, Steuernummern und IBANs sind Dummywerte. Einige Fälle enthalten bewusst Fehler (z. B. leere Käuferreferenz BT-10), um die Validierung der Plattform zu prüfen.
 

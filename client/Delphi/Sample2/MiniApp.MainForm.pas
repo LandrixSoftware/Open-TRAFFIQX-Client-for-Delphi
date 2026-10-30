@@ -179,6 +179,14 @@ type
     ProtocolHint: TLabel;
     ProtocolHelpLink: TLinkLabel;
     ProtocolMemo: TMemo;
+    ProtocolButtons: TFlowPanel;
+    ClearProtocolButton: TButton;
+    RefreshErrorRateButton: TButton;
+    ErrorRateLabel: TLabel;
+    procedure ClearProtocolClick(Sender: TObject);
+    procedure RefreshErrorRateClick(Sender: TObject);
+    procedure ProtocolDblClick(Sender: TObject);
+    procedure ProtocolShow(Sender: TObject);
     procedure FormCreate(Sender: TObject);
     procedure FormCloseQuery(Sender: TObject; var CanClose: Boolean);
     procedure SellerChanged(Sender: TObject);
@@ -271,7 +279,7 @@ implementation
 
 uses
   Vcl.Dialogs, Vcl.Graphics, System.UITypes, System.IOUtils, Winapi.Windows, Winapi.Messages, Winapi.ShellAPI,
-  intf.XRechnungValidationHelperJava;
+  System.RegularExpressions, intf.XRechnungValidationHelperJava;
 
 {$R *.dfm}
 
@@ -355,6 +363,41 @@ const
 begin
   ProtocolMemo.Lines.Add(FormatDateTime('dd.mm.yyyy hh:nn:ss', Now) +
     ' [' + KindNames[AKind] + '] ' + AText);
+end;
+
+procedure TMiniAppMainForm.ClearProtocolClick(Sender: TObject);
+begin
+  // Nur die sichtbaren Sitzungsmeldungen leeren; HTTP-Dateien bleiben erhalten.
+  ProtocolMemo.Clear;
+end;
+
+procedure TMiniAppMainForm.RefreshErrorRateClick(Sender: TObject);
+begin
+  if FService <> nil then
+    FService.RefreshErrorRate;
+end;
+
+procedure TMiniAppMainForm.ProtocolShow(Sender: TObject);
+begin
+  RefreshErrorRateClick(Sender);
+end;
+
+procedure TMiniAppMainForm.ProtocolDblClick(Sender: TObject);
+var
+  LLine: Integer;
+  LMatch: TMatch;
+  LUrl: string;
+begin
+  LLine := ProtocolMemo.CaretPos.Y;
+  if (LLine < 0) or (LLine >= ProtocolMemo.Lines.Count) then Exit;
+  // Keine Dateipfade oder fremden URI-Schemata an die Shell weitergeben.
+  LMatch := TRegEx.Match(ProtocolMemo.Lines[LLine],
+    '\bhttps?://[^\s<>"'']+', [roIgnoreCase]);
+  if not LMatch.Success then Exit;
+  LUrl := LMatch.Value.TrimRight(['.', ',', ';', ')', ']']);
+  if not (LUrl.StartsWith('https://', True) or LUrl.StartsWith('http://', True)) then Exit;
+  if ShellExecute(Handle, 'open', PChar(LUrl), nil, nil, SW_SHOWNORMAL) <= 32 then
+    Log('Die Hilfe-URL konnte nicht im Browser geöffnet werden.', lkWarning);
 end;
 
 procedure TMiniAppMainForm.MarkDirty;
@@ -1484,6 +1527,9 @@ begin
   // Die URL bleibt Datenwert, kein ungeprüftes Markup im TLinkLabel.
   ConnectionHelpLink.Hint := FService.HelpUrl;
   ProtocolHelpLink.Hint := FService.HelpUrl;
+  RefreshErrorRateButton.Enabled := not (FService.Busy or FService.Connecting);
+  if FService.ErrorRateText <> '' then
+    ErrorRateLabel.Caption := FService.ErrorRateText;
   UpdateOutgoingControls;
   UpdateIncomingControls;
 end;

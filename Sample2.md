@@ -126,14 +126,14 @@ vormerken → Download → ZIP vollständig lesen → ablegen → Metadaten → 
 
 ## 8. Scheiben
 
-| Scheibe | Inhalt | ohne DATEV testbar? |
-|---|---|---|
-| S1 | Gerüst, `Model`, `Storage`, Reiter Stammdaten, Beispieldaten | ja |
-| S2 | `InvoiceBuilder`: XRechnung aus Stammdaten, Platzhalter-PDF, optional KoSIT-Validierung | ja |
-| S3 | Reiter Verbindung: Anmelden, Prüfen, Trennen, Userinfo, Token-Ablage | Sandbox |
-| S4 | Senden und Status bis `sent`, `outbox.json`, Sperre gegen doppeltes Senden | Sandbox |
-| S5 | Nach `sent`: Metadaten, Kanalprüfung, Original | Sandbox |
-| S6 | Posteingang mit Offen-Liste und Gültigkeitsanzeige | Sandbox |
-| S7 | Reiter Protokoll, Fehlerquote, README-Abschnitt, Abgleich mit Abnahme.md | – |
+| Scheibe | Inhalt | ohne DATEV testbar? | Status | Commit-Hinweis |
+|---|---|---|---|---|
+| S1 | Gerüst, `Model`, `Storage`, Reiter Stammdaten, Beispieldaten | ja | umgesetzt | d79dcbd |
+| S2 | `InvoiceBuilder`: XRechnung aus Stammdaten, Platzhalter-PDF, optional KoSIT-Validierung | ja | umgesetzt | ec0c9db |
+| S3 | Reiter Verbindung: Anmelden, Prüfen, Trennen, Userinfo, Token-Ablage | Sandbox | umgesetzt | ec9e4da |
+| S4 | Senden und Status bis `sent`, `outbox.json`, Sperre gegen doppeltes Senden | Sandbox | umgesetzt | f3b26f5 (gemeinsam mit S5) |
+| S5 | Nach `sent`: Metadaten, Kanalprüfung, Original | Sandbox | umgesetzt | f3b26f5 (gemeinsam mit S4) |
+| S6 | Posteingang mit Offen-Liste und Gültigkeitsanzeige | Sandbox | umgesetzt | 0efda25 |
+| S7 | Reiter Protokoll, Fehlerquote, README-Abschnitt, Abgleich mit Abnahme.md | – | umgesetzt | Arbeitsstand; auf Wunsch nicht committet |
 
 Geschätzt 3–5 Arbeitstage. Jede Scheibe einzeln gebaut, geprüft und committet.

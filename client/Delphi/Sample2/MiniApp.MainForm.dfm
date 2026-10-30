@@ -1,7 +1,7 @@
 ﻿object MiniAppMainForm: TMiniAppMainForm
   Left = 0
   Top = 0
-  Caption = 'TIA Mini-Anwendung – DATEV-Verbindung und Rechnungen (S1–S5)'
+  Caption = 'TIA Mini-Anwendung – DATEV-Verbindung und Rechnungen'
   ClientHeight = 820
   ClientWidth = 1040
   Constraints.MinHeight = 600
@@ -1371,18 +1371,19 @@
     end
     object ProtocolTab: TTabSheet
       Caption = 'Protokoll'
+      OnShow = ProtocolShow
       object ProtocolHint: TLabel
         Align = alTop
         AutoSize = False
-        Height = 36
+        Height = 60
         Top = 0
-        Caption = 'Service-Meldungen; HTTP-Protokoll in Daten\httplog (14 Tage). Fehlerquote folgt in S7.'
+        Caption = 'Sitzungsmeldungen mit Zeit und Art. Doppelklick öffnet die erste HTTP(S)-URL der Zeile. Fehlerquote: letzte 14 Tage, DATEV-Anfragen (4xx/5xx), ohne Broker. Zielwert nach Produktionsfreigabe: < 10 %. HTTP-Dateien werden verzögert geschrieben.'
         WordWrap = True
         Layout = tlCenter
       end
       object ProtocolHelpLink: TLinkLabel
         Align = alTop
-        Top = 36
+        Top = 60
         AutoSize = False
         Height = 32
         Caption = '<a href="help">Hilfe zum letzten API-Fehler öffnen</a>'
@@ -1390,11 +1391,43 @@
         Visible = False
         OnLinkClick = ConnectionLinkClick
       end
+      object ErrorRateLabel: TLabel
+        Align = alTop
+        Top = 92
+        AutoSize = False
+        Height = 64
+        Caption = 'Fehlerquote noch nicht ausgewertet.'
+        WordWrap = True
+        Layout = tlCenter
+      end
+      object ProtocolButtons: TFlowPanel
+        Align = alTop
+        Top = 156
+        Height = 44
+        BevelOuter = bvNone
+        TabOrder = 1
+        object RefreshErrorRateButton: TButton
+          Width = 210
+          Height = 32
+          Caption = 'Fehlerquote aktualisieren'
+          TabOrder = 0
+          OnClick = RefreshErrorRateClick
+        end
+        object ClearProtocolButton: TButton
+          Width = 180
+          Height = 32
+          Caption = 'Protokoll leeren'
+          TabOrder = 1
+          OnClick = ClearProtocolClick
+        end
+      end
       object ProtocolMemo: TMemo
         Align = alClient
+        TabOrder = 2
         ReadOnly = True
         ScrollBars = ssBoth
         WordWrap = False
+        OnDblClick = ProtocolDblClick
       end
     end
   end
