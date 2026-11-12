@@ -217,7 +217,7 @@ Praktisch bietet sich für dieses Repository folgende Vorbereitungsbasis an:
 
 ## 6. Ergänzungen für die Produktionsfreigabe
 
-Stand nach dem Sandbox-Freigabetermin (September 2026). Für die Produktionsfreigabe gelten neben den TIA-Vorgaben oben auch die **allgemeinen Schnittstellenvorgaben** (developer.datev.de/de/guides/interface-requirements) und die TIA-Seite **Authentifizierung** (OAuth 2.0 & OIDC). Hier die für diese Integration relevanten Punkte.
+Stand nach dem Sandbox-Freigabetermin (September 2026). Für die Produktionsfreigabe gelten neben den TIA-Vorgaben oben auch die [allgemeinen Schnittstellenvorgaben](https://developer.datev.de/de/guides/interface-requirements), die [TIA-Schnittstellenvorgaben](https://developer.datev.de/de/product-detail/traffiqx-invoice/1.0.0/documentation/interface-requirements) und die TIA-Seite [Authentifizierung (OAuth 2.0 & OIDC)](https://developer.datev.de/de/product-detail/traffiqx-invoice/1.0.0/documentation/oauth-20-oidc). Hier die für diese Integration relevanten Punkte.
 
 ### 6.1 Token-Laufzeiten (TIA-Seite Authentifizierung)
 
