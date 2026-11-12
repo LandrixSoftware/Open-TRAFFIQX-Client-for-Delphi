@@ -1,6 +1,7 @@
 # Plan: Sample 2 – eine kleine Anwendung mit DATEV-Anbindung
 
-Stand 29.10.2026, Entscheidungen E1–E5 getroffen.
+Stand 29.10.2026, Entscheidungen E1–E5 getroffen. Umgesetzt mit S1–S7; dieser Plan ist der
+Entwurf dazu. Wo die Umsetzung abweicht, gilt [`client/Delphi/Sample2/README.md`](client/Delphi/Sample2/README.md).
 
 ## 1. Ziel
 
@@ -39,7 +40,7 @@ der Ort für ein Login-Fenster (V3) und eine einfache Token-Verwaltung (V6).
 
 ## 3. Datenablage
 
-Ein Datenordner (Vorgabe: `Daten` neben der EXE, in den Einstellungen änderbar):
+Ein Datenordner `Daten` neben der EXE (fest, siehe E2):
 
 ```
 Daten\
@@ -76,8 +77,9 @@ Ein Hauptfenster mit fünf Reitern:
 5. **Protokoll** – Meldungen des Service mit Zeit und Art, Hilfe-URL anklickbar; Fehlerquote der
    letzten 14 Tage.
 
-Netzwerkaufrufe laufen in einem Worker-Thread (`TTask`), Meldungen kommen per `TThread.Queue` in die
-Oberfläche. Das Login-Polling bleibt, wie die Bibliothek es verlangt, im Hauptthread.
+Senden und Statusabfrage, Posteingang und die Auswertung der Fehlerquote laufen in einem Worker-Thread
+(`TTask`), Meldungen kommen per `TThread.Queue` in die Oberfläche. Verbindungscheck, Userinfo und
+Token-Erneuerung sind kurz und laufen synchron. Das Login-Polling bleibt, wie die Bibliothek es verlangt, im Hauptthread.
 
 ## 5. Abnahme-MUSTs und wo sie sichtbar werden
 
@@ -121,8 +123,8 @@ vormerken → Download → ZIP vollständig lesen → ablegen → Metadaten → 
 - **E2 Datenordner.** `Daten` neben der EXE.
 - **E3 Umgebung.** Sandbox voreingestellt, Produktion umschaltbar mit Warnhinweis.
 - **E4 Rechnungsnummern.** Fortlaufend in `stammdaten.json` (`TEST-0001` …), nie wiederverwendet.
-- **E5 Client-Daten.** Client-ID, Broker-URL und API-Key wie im Sample aus einer INI-Datei, die nicht
-  eingecheckt wird.
+- **E5 Client-Daten.** Client-ID, Broker-URL und API-Key aus einer nicht eingecheckten `.env`
+  (neben der EXE oder im Repository-Wurzelverzeichnis), wie beim Sample.
 
 ## 8. Scheiben
 
@@ -134,6 +136,6 @@ vormerken → Download → ZIP vollständig lesen → ablegen → Metadaten → 
 | S4 | Senden und Status bis `sent`, `outbox.json`, Sperre gegen doppeltes Senden | Sandbox | umgesetzt | f3b26f5 (gemeinsam mit S5) |
 | S5 | Nach `sent`: Metadaten, Kanalprüfung, Original | Sandbox | umgesetzt | f3b26f5 (gemeinsam mit S4) |
 | S6 | Posteingang mit Offen-Liste und Gültigkeitsanzeige | Sandbox | umgesetzt | 0efda25 |
-| S7 | Reiter Protokoll, Fehlerquote, README-Abschnitt, Abgleich mit Abnahme.md | – | umgesetzt | Arbeitsstand; auf Wunsch nicht committet |
+| S7 | Reiter Protokoll, Fehlerquote, README-Abschnitt, Abgleich mit Abnahme.md | – | umgesetzt | e982d69 |
 
 Geschätzt 3–5 Arbeitstage. Jede Scheibe einzeln gebaut, geprüft und committet.

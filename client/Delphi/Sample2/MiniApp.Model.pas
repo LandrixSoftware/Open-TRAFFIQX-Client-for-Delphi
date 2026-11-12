@@ -203,7 +203,8 @@ var
   LCustomer: TMiniAppCustomer;
   LPosition: TMiniAppPosition;
 begin
-  // Ausschließlich fiktive Testdaten; keine gültigen Steuer- oder Bankkennungen.
+  // Ausschließlich fiktive Testdaten. USt-ID und IBAN haben gültige Prüfziffern
+  // (Validierung), gehören aber zu keinem echten Unternehmen bzw. Konto.
   Seller := Default(TMiniAppSeller);
   Seller.Name := 'Muster Handwerk GmbH';
   Seller.Street := 'Beispielweg 1';

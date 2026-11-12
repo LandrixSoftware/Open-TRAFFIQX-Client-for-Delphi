@@ -95,19 +95,6 @@ Zusätzlich für S3 in der Sandbox und einem separaten Testbestand prüfen:
    Tokenwerte/Secrets dürfen nicht enthalten sein. Aufbewahrung gemäß
    `TTraffiqxHttpLog.RETENTION_DAYS` (14 Tage), Fehlerquote im Reiter **Protokoll** prüfen (siehe README).
 
-Build am 30.10.2026: Win32 Debug erfolgreich (ExitCode 0), keine Warnungen in
-Sample2-Units. Die Build-Umgebung meldet einen fehlenden optionalen Registry-Pfad
-und einen nicht vorhandenen TMS-Suchpfad; außerdem bestehen Hinweise in der
-unveränderten API-Bibliothek. DATEV-, KoSIT- und interaktive VCL-/DPI-Prüfungen
-sowie die weiteren Build-Konfigurationen bleiben offen.
-
-Lokale Delphi-Laufzeitprüfung am 30.10.2026 mit isolierten Scratchpad-Testdaten:
-JSON-Rundlauf, monotone Statusfolge, neue ID mit Historie, persistente Uploadsperre,
-defektes JSON und ältere `#PARSE`-Marker erfolgreich geprüft. ZIP-Prüfungen für
-verschachtelte/ungültige Dateinamen, vollständige Ablage, Wiederaufnahme und den
-Schutz vorhandener Originale bestanden; beschädigte Nutzdaten/CRC-Verzeichnisse,
-leere/defekte ZIPs und übergroße Einträge wurden vor der Veröffentlichung abgewiesen.
-
 ### Prüfliste S4/S5
 
 Win32 Debug wurde gebaut; die folgenden DATEV-/UI-Prüfungen bleiben offen.
@@ -200,27 +187,6 @@ In einem separaten Testbestand und mit Sandbox bzw. kontrollierten API-Antworten
 DATEV-, interaktive VCL-/DPI-Prüfungen und weitere Build-Konfigurationen bleiben
 für S6 offen; die Prüfliste beschreibt die noch auszuführende Integrationsabnahme.
 
-S6-Prüfung am 30.10.2026: Win32 Debug mit dem vorgegebenen Build-Befehl erfolgreich
-(ExitCode 0), keine neuen Warnungen oder Hinweise in Sample2-Units. Die bekannten
-Umgebungs-/Bibliothekshinweise bleiben bestehen. Isolierte Delphi-Laufzeittests im
-Scratchpad bestanden: atomare Offen-Liste einschließlich Sperr-/Lesefehlern,
-ZIP-Ablage und sichere Dateinamen, Wiederaufnahme ohne doppelte Ablage,
-Metadaten-Rundlauf und Nachholung, fehlende Dateien/unvollständige Ordner sowie
-CRC-/Format-/Größenfehler ohne Veröffentlichung. Die S4/S5-Ablagetests wurden
-gegen die gemeinsame ZIP-Routine erfolgreich wiederholt. Ein Formular-Smoke-Test
-lädt das DFM und prüft Eingangsspalten sowie gesperrte Aktionen ohne Verbindung
-und Auswahl; er ersetzt keine interaktive Sicht-/DPI-Prüfung.
-
-S6-Review-Nacharbeit am 30.10.2026: Den hohen Befund zum Verlust vorgemerkter
-IDs nach Umgebungswechsel am Code bestätigt und durch die persistente Bindung
-an Umgebung/TRAFFIQX-ID behoben. Isolierter Delphi-Laufzeittest: 25 Prüfungen
-erfolgreich, darunter unveränderte Vormerkungen bei Kontextwechsel, Wiederaufnahme
-im ursprünglichen Kontext, defekte/gesperrte Kontextdateien und gesperrte
-Altbestände ohne Zuordnung. Win32 Debug erneut mit dem vorgegebenen Befehl gebaut:
-ExitCode 0, keine neuen Warnungen/Hinweise in Sample2-Units. Das Build-Skript
-meldet weiterhin den nicht verfügbaren HKCU-Umgebungsschlüssel; die vorhandenen
-Umgebungs-/Bibliothekshinweise verhindern den erfolgreichen Build nicht.
-
 ### Prüfliste S7
 
 1. Protokoll öffnen: Zeit und Art je Meldung, Hinweis auf 14 Tage und Zielwert
@@ -240,12 +206,10 @@ Umgebungs-/Bibliothekshinweise verhindern den erfolgreichen Build nicht.
    bleiben unverändert und die Fehlerquote bleibt sichtbar; erneutes Aktualisieren
    funktioniert. Neue Meldungen werden nach dem Leeren wieder angezeigt.
 
-S7-Prüfung am 30.10.2026: Der vorgegebene Win32-Debug-Build endet mit ExitCode 0,
-keine neuen Warnungen/Hinweise in Sample2-Units. Die bekannten Registry-, Suchpfad-
-und Bibliothekshinweise bleiben bestehen. Isolierter Delphi-Laufzeittest im
-Scratchpad: 20 Prüfungen erfolgreich, einschließlich leerer Protokolle,
-4xx/5xx-Quote, Broker-/Zeitfilter, separater Transportfehler, gesperrter Tagesdatei,
-DFM-Ereignisse, Zeit/Art, Worker-Ergebnisanzeige, Leeren ohne Dateiverlust,
-Ignorieren von Nicht-HTTP-Zeilen und Service-/Formularfreigabe mit laufendem Worker.
-DATEV-/Browser-/interaktive DPI-Prüfungen und weitere Build-Konfigurationen bleiben
-offen; der Formular-Smoke-Test ersetzt keine interaktive Sichtprüfung.
+## Stand der Prüfung
+
+Stand 30.10.2026: Win32 Debug baut ohne Warnungen in den Sample2-Units. Speicherung
+(JSON, Offen-Liste, Versandsperre), ZIP-Ablage und die Auswertung der Fehlerquote wurden
+mit lokalen Testprogrammen geprüft, die nicht im Repository liegen. Offen sind die
+Prüfungen gegen DATEV, die interaktive Sicht- und DPI-Prüfung sowie Win32 Release und
+Win64 Debug/Release; dafür sind die Prüflisten oben gedacht.

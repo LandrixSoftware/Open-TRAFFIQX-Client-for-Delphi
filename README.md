@@ -14,7 +14,7 @@ Wer TIA in die eigene Software einbauen und die DATEV-Produktionsfreigabe erreic
 
 ## Voraussetzungen
 
-- PHP 8.2 oder neuer für den OAuth2-Broker.
+- PHP 8.2 bis 8.5 für den OAuth2-Broker (Bereich, den die Pakete aus `composer.lock` unterstützen).
 - Composer für die PHP-Abhängigkeiten.
 - Webserver mit PHP-Unterstützung oder PHPs eingebauter Server für lokale Smoke-Tests.
 - Delphi mit VCL und WebView2-Unterstützung für das Sample-Projekt. Erstellt und getestet mit Delphi 13.2 Florence; die Bibliothek selbst braucht mindestens Delphi 10.3 (Inline-Variablen) und `System.Net.HttpClient`.
@@ -187,7 +187,7 @@ Bug reports, test cases, documentation improvements and pull requests are welcom
 english version below
 
 Die Bibliothek "Open-TRAFFIQX-Client-for-Delphi" unterliegt eine Doppellizenz. Sie können sie kostenlos
-unter den Bedingungen der [GPL v3.0](https://www.gnu.org/licenses/gpl-3.0.en.html) verwenden, oder Sie erwerben
+unter den Bedingungen der [GPL v3.0 oder später](https://www.gnu.org/licenses/gpl-3.0.en.html) (GPL-3.0-or-later) verwenden, oder Sie erwerben
 eine Lizenz zur kommerziellen Nutzung unter der [Landrix Software Commercial License](commercial.license.md)
 
 Eine kommerzielle Lizenz gewährt Ihnen das Recht, Open-TRAFFIQX-Client-for-Delphi 
@@ -206,7 +206,7 @@ Neue Entwicklungen können abhängig von der für die Implementierung erforderli
 english version
 
 The "Open-TRAFFIQX-Client-for-Delphi" library is dual-licensed. You may choose to use it under the restrictions of 
-the [GPL v3.0](https://www.gnu.org/licenses/gpl-3.0.en.html) at no cost to you, or you may purchase 
+the [GPL v3.0 or later](https://www.gnu.org/licenses/gpl-3.0.en.html) (GPL-3.0-or-later) at no cost to you, or you may purchase 
 a licence under the [Landrix Software Commercial License](./commercial.license.md)
 
 A commercial licence grants you the right to use Open-TRAFFIQX-Client-for-Delphi in your own applications, 

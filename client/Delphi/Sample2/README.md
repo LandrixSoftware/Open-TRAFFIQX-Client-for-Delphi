@@ -23,8 +23,10 @@ stehen unten eine Sandbox-Prüfliste und die Zuordnung der Abnahme-MUSTs.
    wird in der Standard-Ausgabestruktur die `.env` der Repository-Wurzel gelesen
    (fünf Ebenen oberhalb der EXE). Eine lokale Datei ersetzt die gesamte
    Repository-Konfiguration. Ohne `.env` sind Stammdaten und Rechnungserzeugung nutzbar.
-4. Die Vorgabe ist **Sandbox**. Die Beispieldaten sind fiktiv und enthalten
-   bewusst ungültige Bank-/Steuerkennungen; sie sind keine Vorlage für Produktion.
+4. Die Vorgabe ist **Sandbox**. Die Beispieldaten sind fiktiv. USt-ID und IBAN
+   sind öffentliche Dokumentationsbeispiele mit formal gültiger Prüfziffer, damit
+   die Validierung durchläuft; sie gehören zu keinem echten Unternehmen bzw. Konto.
+   Die Daten sind keine Vorlage für Produktion.
 
 Die Konfiguration verwendet einfache `NAME=WERT`-Zeilen:
 

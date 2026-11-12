@@ -189,7 +189,7 @@ Prüffälle für Fehler- und Wartepfade (mit simulierten HTTP-Antworten):
 
 DATEV verlangt ein technisches Protokoll aller Aufrufe, mindestens 14 Tage aufbewahrt, ohne Tokens ([`Abnahme.md`](Abnahme.md) 6.4). Nach der Freigabe muss die Fehlerquote unter 10 % bleiben.
 
-- Die Bibliothek meldet jede Anfrage und Antwort über `OnHttpTrace`. Die Tokens sind dabei schon herausgefiltert, einschließlich Anmeldung, Polling, Erneuerung und Widerruf.
+- Die Bibliothek meldet jede Anfrage und Antwort über `OnHttpTrace`. Tokens und andere geheime Werte werden dabei bereits herausgefiltert, einschließlich Anmeldung, Polling, Erneuerung und Widerruf. Die Schwärzung hat bekannte Grenzen (z. B. sehr kurze Bearer-Werte, siehe README, „Bekannte Grenzen der Diagnose-Schwärzung“); das Protokoll deshalb trotzdem wie vertrauliche Daten behandeln.
 - `intf.TRAFFIQXHttpLog.pas` schreibt diese Meldungen in eine Datei pro Tag, räumt nach 14 Tagen auf und wertet die Fehlerquote aus (`GetErrorRate`). Mehrere Programme dürfen in dasselbe Verzeichnis schreiben, das ist bei Variante B der sinnvolle Weg: ein Protokoll für Server und Arbeitsplätze.
 - Die Auswertung liest Dateien, gegebenenfalls über das Netz. In einer Oberfläche deshalb im Hintergrund auswerten und das Verzeichnis vorher im Hauptthread bestimmen (siehe Kommentar in der Unit).
 - Häufige Ursachen für eine hohe Fehlerquote sind:
