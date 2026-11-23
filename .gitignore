@@ -1,4 +1,19 @@
 # .gitignore
+
+# KI-Agenten: lokale Anweisungen und Arbeitsdateien
+AGENTS.md
+Agents.md
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+.codex/
+.github/copilot-instructions.md
+.github/instructions/
+.github/prompts/
+.cursor/
+.cursorrules
+GEMINI.md
+
 OAuth2-Broker/config/app.local.php
 OAuth2-Broker/composer.phar
 OAuth2-Broker/composer-setup.php
